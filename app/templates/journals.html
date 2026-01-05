@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block title %}期刊数据 - LetPub爬虫{% endblock %}
+{% block content %}
+<div class="card">
+    <div class="flex-between">
+        <h2>期刊列表</h2>
+        <div class="flex">
+            <select id="filter-category" onchange="filterJournals()">
+                <option value="">所有分类</option>
+                {% for cat in categories %}
+                <option value="{{ cat.id }}">{{ cat.name }} ({{ cat.total_count }})</option>
+                {% endfor %}
+            </select>
+            <input type="text" id="search-input" placeholder="搜索期刊名称..." onkeyup="searchJournals(event)">
+            <a href="/api/data/export/journals?format=csv" class="btn btn-success btn-sm">导出CSV</a>
+        </div>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>期刊ID</th>
+                <th>名称</th>
+                <th>ISSN</th>
+                <th>影响因子</th>
+                <th>JCR分区</th>
+                <th>中科院分区</th>
+                <th>详情</th>
+                <th>评论</th>
+            </tr>
+        </thead>
+        <tbody id="journals-table">
+            {% for journal in journals %}
+            <tr>
+                <td>{{ journal.journal_id }}</td>
+                <td>
+                    <a href="https://letpub.com.cn/index.php?journalid={{ journal.journal_id }}&page=journalapp&view=detail" target="_blank">
+                        {{ journal.name[:50] }}{% if journal.name|length > 50 %}...{% endif %}
+                    </a>
+                </td>
+                <td>{{ journal.issn or '-' }}</td>
+                <td>{{ journal.impact_factor or '-' }}</td>
+                <td>{{ journal.jcr_partition or '-' }}</td>
+                <td>{{ journal.cas_partition or '-' }}</td>
+                <td>
+                    <span class="status {% if journal.detail_crawled %}status-completed{% else %}status-pending{% endif %}">
+                        {% if journal.detail_crawled %}已爬取{% else %}未爬取{% endif %}
+                    </span>
+                </td>
+                <td>
+                    <span class="status {% if journal.comments_crawled %}status-completed{% else %}status-pending{% endif %}">
+                        {% if journal.comments_crawled %}已爬取{% else %}未爬取{% endif %}
+                    </span>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="card">
+    <h2>分类统计</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>分类名称</th>
+                <th>分类标识</th>
+                <th>期刊数量</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for cat in categories %}
+            <tr>
+                <td>{{ cat.name }}</td>
+                <td>{{ cat.field_tag }}</td>
+                <td>{{ cat.total_count }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let searchTimeout;
+
+    function searchJournals(event) {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(() => {
+            const search = document.getElementById('search-input').value;
+            const category = document.getElementById('filter-category').value;
+            loadJournals(category, search);
+        }, 500);
+    }
+
+    function filterJournals() {
+        const category = document.getElementById('filter-category').value;
+        const search = document.getElementById('search-input').value;
+        loadJournals(category, search);
+    }
+
+    async function loadJournals(categoryId, search) {
+        let url = '/api/data/journals?size=50';
+        if (categoryId) url += `&category_id=${categoryId}`;
+        if (search) url += `&search=${encodeURIComponent(search)}`;
+
+        const response = await fetch(url);
+        const journals = await response.json();
+
+        const tbody = document.getElementById('journals-table');
+        tbody.innerHTML = journals.map(j => `
+            <tr>
+                <td>${j.journal_id}</td>
+                <td>
+                    <a href="https://letpub.com.cn/index.php?journalid=${j.journal_id}&page=journalapp&view=detail" target="_blank">
+                        ${j.name.substring(0, 50)}${j.name.length > 50 ? '...' : ''}
+                    </a>
+                </td>
+                <td>${j.issn || '-'}</td>
+                <td>${j.impact_factor || '-'}</td>
+                <td>${j.jcr_partition || '-'}</td>
+                <td>${j.cas_partition || '-'}</td>
+                <td>
+                    <span class="status ${j.detail_crawled ? 'status-completed' : 'status-pending'}">
+                        ${j.detail_crawled ? '已爬取' : '未爬取'}
+                    </span>
+                </td>
+                <td>
+                    <span class="status ${j.comments_crawled ? 'status-completed' : 'status-pending'}">
+                        ${j.comments_crawled ? '已爬取' : '未爬取'}
+                    </span>
+                </td>
+            </tr>
+        `).join('');
+    }
+</script>
+{% endblock %}

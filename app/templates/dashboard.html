@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% block title %}控制面板 - LetPub爬虫{% endblock %}
+{% block content %}
+<div class="card">
+    <div class="flex-between">
+        <h2>爬虫控制</h2>
+        <div class="flex">
+            <span id="crawler-status" class="status {% if crawler_status.paused %}status-pending{% elif crawler_status.running %}status-running{% else %}status-failed{% endif %}">
+                {% if crawler_status.paused %}已暂停{% elif crawler_status.running %}运行中{% else %}已停止{% endif %}
+            </span>
+        </div>
+    </div>
+    <div class="flex mt-2">
+        <button class="btn btn-primary" onclick="startCrawler()">开始爬取</button>
+        <button class="btn btn-warning" onclick="pauseCrawler()">暂停</button>
+        <button class="btn btn-success" onclick="resumeCrawler()">恢复</button>
+    </div>
+</div>
+
+<div class="stats-grid">
+    <div class="card">
+        <h2>数据统计</h2>
+        <div class="stats-grid">
+            <div class="stat-item">
+                <div class="stat-value">{{ data_stats.categories }}</div>
+                <div class="stat-label">分类数</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value">{{ data_stats.journals }}</div>
+                <div class="stat-label">期刊数</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value">{{ data_stats.journals_with_detail }}</div>
+                <div class="stat-label">已爬详情</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value">{{ data_stats.comments }}</div>
+                <div class="stat-label">评论数</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>任务统计</h2>
+        <div class="stats-grid">
+            <div class="stat-item">
+                <div class="stat-value">{{ task_stats.by_status.pending or 0 }}</div>
+                <div class="stat-label">待处理</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value">{{ task_stats.by_status.running or 0 }}</div>
+                <div class="stat-label">运行中</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value">{{ task_stats.by_status.completed or 0 }}</div>
+                <div class="stat-label">已完成</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value">{{ task_stats.by_status.failed or 0 }}</div>
+                <div class="stat-label">失败</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Cookie配置</h2>
+    <p class="text-muted text-small mb-2">登录LetPub网站后，从浏览器开发者工具复制Cookie粘贴到下方</p>
+    <div class="form-group">
+        <textarea id="cookie-input" placeholder="粘贴Cookie..."></textarea>
+    </div>
+    <button class="btn btn-primary" onclick="updateCookie()">保存Cookie</button>
+    <span id="cookie-status" class="text-muted text-small" style="margin-left: 10px;"></span>
+</div>
+
+<div class="card">
+    <h2>快速操作</h2>
+    <div class="flex">
+        <button class="btn btn-primary" onclick="retryAllFailed()">重试所有失败任务</button>
+        <button class="btn btn-danger" onclick="clearCompleted()">清理已完成任务</button>
+        <a href="/api/data/export/journals?format=csv" class="btn btn-success">导出期刊CSV</a>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    async function startCrawler() {
+        const result = await apiCall('/api/crawler/start');
+        if (result) {
+            updateStatus('运行中', 'status-running');
+            alert('爬取任务已创建');
+        }
+    }
+
+    async function pauseCrawler() {
+        const result = await apiCall('/api/crawler/pause');
+        if (result) {
+            updateStatus('已暂停', 'status-pending');
+        }
+    }
+
+    async function resumeCrawler() {
+        const result = await apiCall('/api/crawler/resume');
+        if (result) {
+            updateStatus('运行中', 'status-running');
+        }
+    }
+
+    function updateStatus(text, className) {
+        const el = document.getElementById('crawler-status');
+        el.textContent = text;
+        el.className = 'status ' + className;
+    }
+
+    async function updateCookie() {
+        const cookie = document.getElementById('cookie-input').value;
+        const response = await fetch('/api/config/cookie', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cookie })
+        });
+        const result = await response.json();
+        document.getElementById('cookie-status').textContent = result.message || '已保存';
+    }
+
+    async function retryAllFailed() {
+        const result = await apiCall('/api/tasks/retry-all-failed');
+        if (result) {
+            alert(result.message);
+            location.reload();
+        }
+    }
+
+    async function clearCompleted() {
+        if (confirm('确定要清理所有已完成的任务吗？')) {
+            const result = await fetch('/api/tasks/completed', { method: 'DELETE' });
+            const data = await result.json();
+            alert(data.message);
+            location.reload();
+        }
+    }
+
+    // 每30秒刷新页面
+    setTimeout(() => location.reload(), 30000);
+</script>
+{% endblock %}

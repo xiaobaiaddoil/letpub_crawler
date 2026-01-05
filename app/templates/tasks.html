@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}任务管理 - LetPub爬虫{% endblock %}
+{% block content %}
+<div class="card">
+    <div class="flex-between">
+        <h2>任务列表</h2>
+        <div class="flex">
+            <select id="filter-status" onchange="filterTasks()">
+                <option value="">所有状态</option>
+                <option value="pending">待处理</option>
+                <option value="running">运行中</option>
+                <option value="completed">已完成</option>
+                <option value="failed">失败</option>
+            </select>
+            <select id="filter-type" onchange="filterTasks()">
+                <option value="">所有类型</option>
+                <option value="category">分类</option>
+                <option value="list">列表</option>
+                <option value="detail">详情</option>
+            </select>
+            <button class="btn btn-primary btn-sm" onclick="location.reload()">刷新</button>
+        </div>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>类型</th>
+                <th>目标</th>
+                <th>状态</th>
+                <th>重试次数</th>
+                <th>创建时间</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody id="tasks-table">
+            {% for task in tasks %}
+            <tr data-status="{{ task.status }}" data-type="{{ task.task_type }}">
+                <td>{{ task.id }}</td>
+                <td>
+                    {% if task.task_type == 'category' %}分类
+                    {% elif task.task_type == 'list' %}列表
+                    {% elif task.task_type == 'detail' %}详情
+                    {% else %}{{ task.task_type }}
+                    {% endif %}
+                </td>
+                <td>
+                    <span title="{{ task.target_url or '' }}">{{ task.target_id }}</span>
+                </td>
+                <td>
+                    <span class="status status-{{ task.status }}">
+                        {% if task.status == 'pending' %}待处理
+                        {% elif task.status == 'running' %}运行中
+                        {% elif task.status == 'completed' %}已完成
+                        {% elif task.status == 'failed' %}失败
+                        {% else %}{{ task.status }}
+                        {% endif %}
+                    </span>
+                </td>
+                <td>{{ task.retry_count }} / {{ task.max_retry }}</td>
+                <td class="text-small">{{ task.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                <td>
+                    {% if task.status == 'failed' %}
+                    <button class="btn btn-warning btn-sm" onclick="retryTask({{ task.id }})">重试</button>
+                    {% endif %}
+                    {% if task.status != 'running' %}
+                    <button class="btn btn-danger btn-sm" onclick="deleteTask({{ task.id }})">删除</button>
+                    {% endif %}
+                    {% if task.error_message %}
+                    <button class="btn btn-sm" onclick="showError('{{ task.error_message | replace("'", "\\'") }}')">查看错误</button>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function filterTasks() {
+        const status = document.getElementById('filter-status').value;
+        const type = document.getElementById('filter-type').value;
+        const rows = document.querySelectorAll('#tasks-table tr');
+
+        rows.forEach(row => {
+            const rowStatus = row.dataset.status;
+            const rowType = row.dataset.type;
+            let show = true;
+
+            if (status && rowStatus !== status) show = false;
+            if (type && rowType !== type) show = false;
+
+            row.style.display = show ? '' : 'none';
+        });
+    }
+
+    async function retryTask(taskId) {
+        const result = await apiCall(`/api/tasks/${taskId}/retry`);
+        if (result) {
+            alert(result.message);
+            location.reload();
+        }
+    }
+
+    async function deleteTask(taskId) {
+        if (confirm('确定要删除这个任务吗？')) {
+            const result = await fetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
+            const data = await result.json();
+            alert(data.message);
+            location.reload();
+        }
+    }
+
+    function showError(message) {
+        alert('错误信息:\n\n' + message);
+    }
+
+    // 每15秒刷新
+    setTimeout(() => location.reload(), 15000);
+</script>
+{% endblock %}
