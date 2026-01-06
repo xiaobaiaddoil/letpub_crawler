@@ -13,11 +13,21 @@ class Journal(Base):
     name = Column(String(500), nullable=False)
     issn = Column(String(20))
     eissn = Column(String(20))
-    impact_factor = Column(Numeric(10, 4))
-    jcr_partition = Column(String(50))  # JCR分区
-    cas_partition = Column(String(50))  # 中科院分区
-    review_speed = Column(String(100))  # 审稿速度
-    acceptance_rate = Column(String(50))  # 录用比例
+
+    # 影响因子相关
+    impact_factor = Column(Numeric(10, 4))  # 影响因子
+    impact_factor_realtime = Column(Numeric(10, 4))  # 实时影响因子
+    self_citation_rate = Column(String(100))  # 自引率
+
+    # 分区和评分
+    jcr_partition = Column(String(10000))  # JCR分区
+    cas_partition = Column(String(10000))  # 中科院分区（可能包含多个分区信息）
+    cas_warning = Column(String(10000))  # CAS预警信息
+    citescore = Column(String(10000))  # CiteScore
+
+    # 审稿相关
+    review_speed = Column(String(10000))  # 审稿速度
+    acceptance_rate = Column(String(10000))  # 录用比例
 
     category_id = Column(Integer, ForeignKey("categories.id"))
     detail_crawled = Column(Boolean, default=False)

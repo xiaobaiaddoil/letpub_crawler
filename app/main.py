@@ -14,13 +14,14 @@ from app.database import init_db, get_db, SessionLocal
 from app.api import tasks, data
 from app.services.crawler_service import crawler_service
 from app.services.task_manager import TaskManager
+from app.logging_config import setup_app_logging, clean_old_logs
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# 初始化日志系统
+setup_app_logging(debug=config.DEBUG)
 logger = logging.getLogger(__name__)
+
+# 清理超过7天的旧日志文件
+clean_old_logs(days=7)
 
 # 模板目录
 templates_dir = Path(__file__).parent / "templates"

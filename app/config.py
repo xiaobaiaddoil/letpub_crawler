@@ -8,6 +8,10 @@ if env_path.exists():
     load_dotenv(env_path)
 
 class Config:
+    # 应用配置
+    DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"
+
+    CONSOLE_LOGGER_LEVEL: bool = os.getenv("DEBUG", "false").lower() == "true"
     # 数据库配置
     DATABASE_URL: str = os.getenv(
         "DATABASE_URL",
@@ -18,6 +22,10 @@ class Config:
     CRAWL_DELAY_MIN: int = int(os.getenv("CRAWL_DELAY_MIN", "3"))
     CRAWL_DELAY_MAX: int = int(os.getenv("CRAWL_DELAY_MAX", "8"))
     MAX_RETRY: int = int(os.getenv("MAX_RETRY", "3"))
+
+    # 分布式配置
+    WORKER_ID: str = os.getenv("WORKER_ID", "")  # 可手动指定worker标识，为空则自动生成
+    TASK_LOCK_TIMEOUT: int = int(os.getenv("TASK_LOCK_TIMEOUT", "300"))  # 任务锁定超时时间（秒）
 
     # Cookie配置
     LETPUB_COOKIE: str = os.getenv("LETPUB_COOKIE", "")

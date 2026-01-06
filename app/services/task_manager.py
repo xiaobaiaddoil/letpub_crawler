@@ -1,21 +1,45 @@
 import json
 import logging
-from datetime import datetime
+import uuid
+import socket
+import os
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_
 from app.models.task import CrawlTask, TaskType, TaskStatus
-from app.models.category import Category
 from app.models.journal import Journal
 from app.config import config
 
 logger = logging.getLogger(__name__)
 
-class TaskManager:
-    """任务管理器"""
+# 任务锁定超时时间（秒）- 超过此时间的RUNNING任务会被释放
+TASK_LOCK_TIMEOUT = config.TASK_LOCK_TIMEOUT
 
-    def __init__(self, db: Session):
+
+def get_utc_now() -> datetime:
+    """获取当前UTC时间"""
+    return datetime.now(timezone.utc)
+
+
+def generate_worker_id() -> str:
+    """生成唯一的worker标识"""
+    # 如果配置了 WORKER_ID，使用配置的值
+    if config.WORKER_ID:
+        return config.WORKER_ID
+
+    hostname = socket.gethostname()
+    pid = os.getpid()
+    unique_id = uuid.uuid4().hex[:8]
+    return f"{hostname}-{pid}-{unique_id}"
+
+
+class TaskManager:
+    """任务管理器 - 支持分布式部署"""
+
+    def __init__(self, db: Session, worker_id: str = None):
         self.db = db
+        self.worker_id = worker_id or generate_worker_id()
+        logger.info(f"TaskManager 初始化，worker_id: {self.worker_id}")
 
     def create_category_task(self) -> CrawlTask:
         """创建分类爬取任务"""
@@ -122,7 +146,7 @@ class TaskManager:
         return task
 
     def get_pending_tasks(self, task_type: str = None, limit: int = 10) -> List[CrawlTask]:
-        """获取待处理任务"""
+        """获取待处理任务（旧方法，保留兼容性）"""
         query = self.db.query(CrawlTask).filter(
             CrawlTask.status == TaskStatus.PENDING.value
         )
@@ -132,6 +156,73 @@ class TaskManager:
 
         return query.order_by(CrawlTask.created_at).limit(limit).all()
 
+    def acquire_tasks(self, task_type: str = None, limit: int = 1) -> List[CrawlTask]:
+        """原子性获取并锁定任务（分布式安全）
+
+        使用 SELECT ... FOR UPDATE SKIP LOCKED 实现：
+        - 原子性：获取和锁定在同一事务中完成
+        - 无竞争：SKIP LOCKED 跳过已被其他worker锁定的行
+        - 超时释放：同时释放超时的任务
+        """
+        now = get_utc_now()
+        timeout_threshold = now - timedelta(seconds=TASK_LOCK_TIMEOUT)
+
+        acquired_tasks = []
+
+        try:
+            # 先释放超时的任务（被其他节点锁定但超时的）
+            self._release_timeout_tasks(timeout_threshold)
+
+            # 构建查询：获取 PENDING 状态的任务
+            query = self.db.query(CrawlTask).filter(
+                CrawlTask.status == TaskStatus.PENDING.value
+            )
+
+            if task_type:
+                query = query.filter(CrawlTask.task_type == task_type)
+
+            # 使用 FOR UPDATE SKIP LOCKED 进行行级锁定
+            # SKIP LOCKED: 跳过已被锁定的行，避免等待
+            tasks = query.order_by(CrawlTask.created_at).limit(limit).with_for_update(skip_locked=True).all()
+
+            for task in tasks:
+                # 原子性地更新任务状态
+                task.status = TaskStatus.RUNNING.value
+                task.worker_id = self.worker_id
+                task.locked_at = now
+                task.started_at = now
+                acquired_tasks.append(task)
+
+            self.db.commit()
+
+            if acquired_tasks:
+                logger.info(f"Worker {self.worker_id} 获取 {len(acquired_tasks)} 个任务: {[t.id for t in acquired_tasks]}")
+
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"获取任务失败: {e}")
+
+        return acquired_tasks
+
+    def _release_timeout_tasks(self, timeout_threshold: datetime):
+        """释放超时的任务"""
+        try:
+            count = self.db.query(CrawlTask).filter(
+                CrawlTask.status == TaskStatus.RUNNING.value,
+                CrawlTask.locked_at < timeout_threshold
+            ).update({
+                CrawlTask.status: TaskStatus.PENDING.value,
+                CrawlTask.worker_id: None,
+                CrawlTask.locked_at: None,
+                CrawlTask.started_at: None
+            })
+
+            if count > 0:
+                self.db.commit()
+                logger.warning(f"释放 {count} 个超时任务")
+        except Exception as e:
+            logger.error(f"释放超时任务失败: {e}")
+
     def get_failed_tasks(self, limit: int = 10) -> List[CrawlTask]:
         """获取失败任务（可重试）"""
         return self.db.query(CrawlTask).filter(
@@ -140,33 +231,42 @@ class TaskManager:
         ).order_by(CrawlTask.created_at).limit(limit).all()
 
     def start_task(self, task: CrawlTask):
-        """开始任务"""
+        """开始任务（旧方法，使用 acquire_tasks 更安全）"""
+        now = get_utc_now()
         task.status = TaskStatus.RUNNING.value
-        task.started_at = datetime.utcnow()
+        task.worker_id = self.worker_id
+        task.locked_at = now
+        task.started_at = now
         self.db.commit()
-        logger.info(f"开始任务: {task.id} ({task.task_type})")
+        logger.info(f"开始任务: {task.id} ({task.task_type}) by {self.worker_id}")
 
     def complete_task(self, task: CrawlTask):
         """完成任务"""
+        now = get_utc_now()
         task.status = TaskStatus.COMPLETED.value
-        task.completed_at = datetime.utcnow()
+        task.completed_at = now
+        task.locked_at = None  # 清除锁定时间
         self.db.commit()
-        logger.info(f"完成任务: {task.id}")
+        logger.info(f"完成任务: {task.id} by {self.worker_id}")
 
     def fail_task(self, task: CrawlTask, error: str):
         """任务失败"""
+        now = get_utc_now()
         task.status = TaskStatus.FAILED.value
         task.retry_count += 1
         task.error_message = error
-        task.completed_at = datetime.utcnow()
+        task.completed_at = now
+        task.locked_at = None  # 清除锁定时间
         self.db.commit()
-        logger.error(f"任务失败: {task.id}, 错误: {error}")
+        logger.error(f"任务失败: {task.id}, 错误: {error}, worker: {self.worker_id}")
 
     def retry_task(self, task: CrawlTask):
         """重试任务"""
         if task.retry_count < task.max_retry:
             task.status = TaskStatus.PENDING.value
             task.error_message = None
+            task.worker_id = None  # 清除worker标识
+            task.locked_at = None  # 清除锁定时间
             self.db.commit()
             logger.info(f"重试任务: {task.id}")
             return True
@@ -189,19 +289,43 @@ class TaskManager:
             ).count()
             type_stats[task_type.value] = count
 
+        # 按worker统计运行中的任务
+        worker_stats = {}
+        running_tasks = self.db.query(CrawlTask).filter(
+            CrawlTask.status == TaskStatus.RUNNING.value
+        ).all()
+        for task in running_tasks:
+            worker = task.worker_id or "unknown"
+            worker_stats[worker] = worker_stats.get(worker, 0) + 1
+
         return {
             "by_status": stats,
             "by_type": type_stats,
+            "by_worker": worker_stats,
             "total": sum(stats.values())
         }
 
-    def reset_running_tasks(self):
-        """重置运行中的任务为待处理（用于程序重启后恢复）"""
-        count = self.db.query(CrawlTask).filter(
+    def reset_running_tasks(self, only_current_worker: bool = False):
+        """重置运行中的任务为待处理
+
+        Args:
+            only_current_worker: 如果为True，只重置当前worker的任务
+        """
+        query = self.db.query(CrawlTask).filter(
             CrawlTask.status == TaskStatus.RUNNING.value
-        ).update({CrawlTask.status: TaskStatus.PENDING.value})
+        )
+
+        if only_current_worker:
+            query = query.filter(CrawlTask.worker_id == self.worker_id)
+
+        count = query.update({
+            CrawlTask.status: TaskStatus.PENDING.value,
+            CrawlTask.worker_id: None,
+            CrawlTask.locked_at: None,
+            CrawlTask.started_at: None
+        })
         self.db.commit()
-        logger.info(f"重置 {count} 个运行中的任务")
+        logger.info(f"重置 {count} 个运行中的任务 (only_current_worker={only_current_worker})")
         return count
 
     def reset_detail_task(self, journal_id: int) -> bool:

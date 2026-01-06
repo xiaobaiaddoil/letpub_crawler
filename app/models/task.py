@@ -29,6 +29,10 @@ class CrawlTask(Base):
     max_retry = Column(Integer, default=3)
     error_message = Column(Text)
 
+    # 分布式支持字段
+    worker_id = Column(String(100), nullable=True, index=True)  # 执行节点标识
+    locked_at = Column(DateTime, nullable=True)  # 任务锁定时间（用于超时释放）
+
     # 额外数据
     extra_data = Column(Text)  # JSON格式的额外数据
 
@@ -37,4 +41,4 @@ class CrawlTask(Base):
     completed_at = Column(DateTime)
 
     def __repr__(self):
-        return f"<CrawlTask(id={self.id}, type={self.task_type}, target={self.target_id}, status={self.status})>"
+        return f"<CrawlTask(id={self.id}, type={self.task_type}, target={self.target_id}, status={self.status}, worker={self.worker_id})>"

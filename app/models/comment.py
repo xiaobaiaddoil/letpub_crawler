@@ -8,7 +8,7 @@ class Comment(Base):
     __tablename__ = "comments"
 
     id = Column(Integer, primary_key=True, index=True)
-    journal_id = Column(Integer, ForeignKey("journals.id"), nullable=False)
+    journal_id = Column(Integer, ForeignKey("journals.journal_id"), nullable=False)
     comment_id = Column(String(100), unique=True, nullable=False, index=True)  # 用于去重
 
     content = Column(Text)
@@ -17,6 +17,7 @@ class Comment(Base):
     submit_experience = Column(Text)  # 投稿经历
 
     comment_time = Column(DateTime)  # 评论时间
+    # publish_time = Column(DateTime)  # 评论更新时间
     crawled_at = Column(DateTime, default=datetime.utcnow)
 
     # 关联

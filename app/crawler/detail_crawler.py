@@ -97,7 +97,7 @@ class DetailCrawler(BaseCrawler):
             # 提取并规范化常用字段
             info = self._normalize_info(info)
             
-            logger.info(f"提取基本信息: {info.get('name', 'Unknown')}, 共 {len(info)} 个字段")
+            logger.info(f"提取基本信息: {info.get('期刊名字', 'Unknown')}, 共 {len(info)} 个字段")
 
         except Exception as e:
             logger.error(f"提取基本信息失败: {e}")
@@ -396,12 +396,15 @@ class DetailCrawler(BaseCrawler):
             r'E-ISSN|EISSN|电子ISSN': 'eissn',
 
             # 影响因子相关
-            r'最新影响因子|影响因子|Impact_Factor': 'impact_factor',
+            r'最新影响因子': 'impact_factor',
+            r'实时影响因子|即时影响因子': 'impact_factor_realtime',
             r'5年影响因子|五年影响因子': 'impact_factor_5year',
+            r'自引率': 'self_citation_rate',
 
             # 分区相关
             r'JCR分区|JCR_分区': 'jcr_partition',
-            r'中科院分区|CAS分区': 'cas_partition',
+            r'中国科学院期刊分区.*2025年3月最新升级版.*|CAS分区': 'cas_partition',
+            r'CAS警告|国际期刊预警名单|预警': 'cas_warning',
 
             # 审稿相关
             r'审稿速度|平均审稿速度': 'review_speed',
@@ -428,12 +431,12 @@ class DetailCrawler(BaseCrawler):
                     value = info[key]
 
                     # 对某些字段进行特殊处理
-                    if normalized_key == 'impact_factor' and isinstance(value, str):
+                    if normalized_key in ['impact_factor', 'impact_factor_realtime'] and isinstance(value, str):
                         # 尝试提取数字
-                        match = re.search(r'(\d+\.?\d*)', value)
+                        match = re.search(r'\d+\.\d+', value)
                         if match:
                             try:
-                                value = float(match.group(1))
+                                value = float(match.group(0))
                             except:
                                 pass
 
@@ -507,7 +510,7 @@ class DetailCrawler(BaseCrawler):
                     # 解析每条评论  每条评论是一个div字符串需要处理
                     for item in comment_data:
                         try:
-                            comment = self._parse_comment_from_api(item)
+                            comment = self._parse_comment_from_api(journal_id,item)
                             if comment:
                                 comments.append(comment)
                         except Exception as e:
@@ -543,7 +546,7 @@ class DetailCrawler(BaseCrawler):
 
         return comments
 
-    def _parse_comment_from_api(self, item: Dict) -> Optional[Dict]:
+    def _parse_comment_from_api(self, journal_id:str,item: Dict) -> Optional[Dict]:
         """解析API返回的单条评论数据"""
         try:
             # API返回的评论数据是HTML字符串
@@ -567,23 +570,20 @@ class DetailCrawler(BaseCrawler):
                 author = author_link.get_text().strip()
 
             # 提取期刊评分
-            rating = None
-            rating_div = soup.find('strong', string=re.compile(r'期刊评分'))
+            rating = "暂无评分"  # 默认值
+            rating_div = soup.find('div', string=re.compile(r'期刊评分'))
             if rating_div:
                 # 评分在后面的div中
-                rating_value_div = rating_div.find_next_sibling('div')
+                rating_value_div = rating_div.find_next_sibling('div').find_next_sibling('div')
                 if rating_value_div:
                     rating_text = rating_value_div.get_text().strip()
-                    try:
-                        rating = float(rating_text)
-                    except:
-                        rating = rating_text
-
+                    if rating_text:
+                        rating = rating_text  # 保持字符串格式
             # 提取研究方向
             research_fields = None
             research_span = soup.find('strong', string=re.compile(r'研究方向'))
             if research_span:
-                research_fields = research_span.find_parent().get_text()
+                research_fields = research_span.find_parent().get_text().strip()
             
             # 提取投稿结果
             submission_result = None
@@ -601,13 +601,32 @@ class DetailCrawler(BaseCrawler):
             publish_time = None
             publish_span = soup.find('strong', string=re.compile(r'发表时间'))
             if publish_span:
-                publish_time = publish_span.find_parent().get_text().strip()
+                parent_text = publish_span.find_parent().get_text().strip()
+                # 移除 "发表时间：" 前缀
+                time_str = parent_text.replace('发表时间：', '').replace('发表时间', '').strip()
+                if time_str:
+                    try:
+                        from datetime import datetime
+                        publish_time = datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S')
+                    except ValueError:
+                        # 如果解析失败，记录日志但继续
+                        logger.warning(f"无法解析发表时间: {time_str}")
+                        publish_time = None
 
             # 提取最后更新时间
             update_time = None
             update_span = soup.find('strong', string=re.compile(r'最后更新'))
             if update_span:
-                update_time = update_span.find_parent().get_text().strip()
+                parent_text = update_span.find_parent().get_text().strip()
+                # 移除 "最后更新：" 前缀
+                time_str = parent_text.replace('最后更新：', '').replace('最后更新', '').strip()
+                if time_str:
+                    try:
+                        from datetime import datetime
+                        update_time = datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S')
+                    except ValueError:
+                        logger.warning(f"无法解析更新时间: {time_str}")
+                        update_time = None
 
             # 提取投稿经验（主要内容）
             experience = None
@@ -633,17 +652,16 @@ class DetailCrawler(BaseCrawler):
                 "research_fields": research_fields,
                 "submission_result": submission_result,
                 "submission_period": submission_period,
-                "publish_time": publish_time,
-                "update_time": update_time,
+                "publish_time": publish_time,  # datetime 对象
+                "update_time": update_time,    # datetime 对象
                 "content": experience,
-                "comment_time": publish_time or update_time or "",
+                "comment_time": publish_time or update_time,  # 优先使用 publish_time
             }
 
             # 生成唯一ID
-            content_preview = experience[:100]
             author_name = comment.get("author", "anonymous")
             time_str = comment.get("comment_time", "")
-            comment["comment_id"] = str(hash(f"{content_preview}_{author_name}_{time_str}"))
+            comment["comment_id"] = str(hash(f"{journal_id}_{floor}_{author_name}"))
 
             return comment
 

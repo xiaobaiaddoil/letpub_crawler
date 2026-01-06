@@ -4,7 +4,7 @@ import logging
 import math
 from typing import Optional
 from sqlalchemy.orm import Session
-from app.services.task_manager import TaskManager
+from app.services.task_manager import TaskManager, generate_worker_id
 from app.models.task import TaskType, TaskStatus, CrawlTask
 from app.models.category import Category
 from app.models.journal import Journal
@@ -19,12 +19,15 @@ logger = logging.getLogger(__name__)
 # 每页期刊数量（根据网站实际情况调整）
 JOURNALS_PER_PAGE = 10
 
-class CrawlerService:
-    """爬虫服务 - 协调各爬虫执行"""
 
-    def __init__(self):
+class CrawlerService:
+    """爬虫服务 - 协调各爬虫执行（支持分布式部署）"""
+
+    def __init__(self, worker_id: str = None):
         self._running = False
         self._paused = False
+        self.worker_id = worker_id or generate_worker_id()
+        logger.info(f"CrawlerService 初始化，worker_id: {self.worker_id}")
 
     @property
     def is_running(self) -> bool:
@@ -37,22 +40,22 @@ class CrawlerService:
     def pause(self):
         """暂停爬虫"""
         self._paused = True
-        logger.info("爬虫已暂停")
+        logger.info(f"爬虫已暂停 (worker: {self.worker_id})")
 
     def resume(self):
         """恢复爬虫"""
         self._paused = False
-        logger.info("爬虫已恢复")
+        logger.info(f"爬虫已恢复 (worker: {self.worker_id})")
 
     def stop(self):
         """停止爬虫"""
         self._running = False
-        logger.info("爬虫已停止")
+        logger.info(f"爬虫已停止 (worker: {self.worker_id})")
 
     async def run(self):
         """运行爬虫主循环"""
         self._running = True
-        logger.info("爬虫服务启动")
+        logger.info(f"爬虫服务启动 (worker: {self.worker_id})")
 
         while self._running:
             if self._paused:
@@ -61,10 +64,11 @@ class CrawlerService:
 
             db = SessionLocal()
             try:
-                task_manager = TaskManager(db)
+                task_manager = TaskManager(db, self.worker_id)
 
-                # 重置之前运行中的任务
-                task_manager.reset_running_tasks()
+                # 只重置当前worker的运行中任务（分布式环境下不应重置其他worker的任务）
+                # 注意：超时任务会在 acquire_tasks 中自动释放
+                # task_manager.reset_running_tasks(only_current_worker=True)
 
                 # 首先处理分类任务
                 await self._process_category_tasks(db, task_manager)
@@ -81,25 +85,26 @@ class CrawlerService:
                 # 检查是否还有任务
                 pending_count = len(task_manager.get_pending_tasks(limit=1))
                 if pending_count == 0:
-                    logger.info("所有任务完成，等待新任务...")
+                    logger.info(f"所有任务完成，等待新任务... (worker: {self.worker_id})")
                     await asyncio.sleep(10)
 
             except Exception as e:
-                logger.error(f"爬虫循环错误: {e}")
+                logger.error(f"爬虫循环错误: {e} (worker: {self.worker_id})")
                 await asyncio.sleep(5)
             finally:
                 db.close()
 
-        logger.info("爬虫服务已停止")
+        logger.info(f"爬虫服务已停止 (worker: {self.worker_id})")
 
     async def _process_category_tasks(self, db: Session, task_manager: TaskManager):
         """处理分类任务 - 增量爬取，只处理有变化的分类"""
-        tasks = task_manager.get_pending_tasks(TaskType.CATEGORY.value, limit=1)
+        # 使用 acquire_tasks 原子性获取任务
+        tasks = task_manager.acquire_tasks(TaskType.CATEGORY.value, limit=1)
         if not tasks:
             return
 
         task = tasks[0]
-        task_manager.start_task(task)
+        # 任务已在 acquire_tasks 中被标记为 RUNNING
 
         try:
             async with CategoryCrawler() as crawler:
@@ -156,17 +161,20 @@ class CrawlerService:
                 task_manager.complete_task(task)
 
         except Exception as e:
+            db.rollback()  # 回滚事务
+            logger.exception(f"处理分类任务失败")
             task_manager.fail_task(task, str(e))
 
     async def _process_list_tasks(self, db: Session, task_manager: TaskManager):
         """处理列表任务"""
-        tasks = task_manager.get_pending_tasks(TaskType.LIST.value, limit=5)
+        # 使用 acquire_tasks 原子性获取任务
+        tasks = task_manager.acquire_tasks(TaskType.LIST.value, limit=5)
 
         for task in tasks:
             if not self._running or self._paused:
                 break
 
-            task_manager.start_task(task)
+            # 任务已在 acquire_tasks 中被标记为 RUNNING
 
             try:
                 extra = json.loads(task.extra_data) if task.extra_data else {}
@@ -206,17 +214,20 @@ class CrawlerService:
                 task_manager.complete_task(task)
 
             except Exception as e:
+                db.rollback()  # 回滚事务
+                logger.exception(f"处理列表任务失败")
                 task_manager.fail_task(task, str(e))
 
     async def _process_detail_tasks(self, db: Session, task_manager: TaskManager):
         """处理详情任务"""
-        tasks = task_manager.get_pending_tasks(TaskType.DETAIL.value, limit=3)
+        # 使用 acquire_tasks 原子性获取任务
+        tasks = task_manager.acquire_tasks(TaskType.DETAIL.value, limit=3)
 
         for task in tasks:
             if not self._running or self._paused:
                 break
 
-            task_manager.start_task(task)
+            # 任务已在 acquire_tasks 中被标记为 RUNNING
 
             try:
                 journal_id = int(task.target_id)
@@ -231,14 +242,26 @@ class CrawlerService:
 
                     if journal:
                         basic_info = detail.get("basic_info", {})
-                        journal.name = basic_info.get("name", journal.name)
+                        # journal.name = basic_info.get("name", journal.name)
                         journal.issn = basic_info.get("issn", journal.issn)
-                        journal.eissn = basic_info.get("eissn")
+                        journal.eissn = basic_info.get("E-ISSN")
+
+                        # 影响因子相关
                         journal.impact_factor = basic_info.get("impact_factor", journal.impact_factor)
+                        journal.impact_factor_realtime = basic_info.get("impact_factor_realtime")
+                        journal.self_citation_rate = basic_info.get("self_citation_rate")
+
+                        # 分区和评分
                         journal.jcr_partition = basic_info.get("jcr_partition")
                         journal.cas_partition = basic_info.get("cas_partition")
+                        journal.cas_warning = basic_info.get("cas_warning")
+                        journal.citescore = basic_info.get("citescore")
+
+                        # 审稿相关
                         journal.review_speed = basic_info.get("review_speed")
                         journal.acceptance_rate = basic_info.get("acceptance_rate")
+
+                        # 存储完整详情数据（SQLAlchemy会自动处理dict到JSONB的转换）
                         journal.detail_data = basic_info
                         journal.detail_crawled = True
 
@@ -254,11 +277,13 @@ class CrawlerService:
 
                             if not existing:
                                 comment = Comment(
-                                    journal_id=journal.id,
+                                    journal_id=journal.journal_id,
                                     comment_id=comment_id,
                                     content=c_data.get("content"),
                                     author=c_data.get("author"),
-                                    rating=c_data.get("rating")
+                                    rating=c_data.get("rating"),
+                                    submit_experience=c_data.get("submit_experience"),
+                                    comment_time=c_data.get("comment_time")  # 使用 comment_time 字段（已转换为 datetime）
                                 )
                                 db.add(comment)
 
@@ -268,6 +293,8 @@ class CrawlerService:
                 task_manager.complete_task(task)
 
             except Exception as e:
+                db.rollback()  # 回滚事务
+                logger.exception(f"处理详情任务失败 (journal_id={task.target_id})")
                 task_manager.fail_task(task, str(e))
 
     async def _retry_failed_tasks(self, db: Session, task_manager: TaskManager):
@@ -280,7 +307,7 @@ class CrawlerService:
         """启动完整爬取"""
         db = SessionLocal()
         try:
-            task_manager = TaskManager(db)
+            task_manager = TaskManager(db, self.worker_id)
             task_manager.create_category_task()
             logger.info("已创建分类爬取任务，爬虫将自动开始")
         finally:

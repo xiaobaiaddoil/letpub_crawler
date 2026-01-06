@@ -11,6 +11,8 @@ class CategoryCrawler(BaseCrawler):
 
     async def crawl(self) -> List[Dict]:
         """爬取分类列表"""
+        categories = []
+
         success = await self.goto(config.ENTRY_URL)
         if not success:
             raise Exception("无法访问入口页面")

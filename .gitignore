@@ -53,3 +53,5 @@ test-results/
 # OS
 .DS_Store
 Thumbs.db
+
+migrations/
