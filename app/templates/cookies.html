@@ -1,0 +1,216 @@
+{% extends "base.html" %}
+{% block title %}Cookie池管理 - LetPub爬虫{% endblock %}
+{% block content %}
+<div class="card">
+    <div class="flex-between">
+        <h2>Cookie池管理</h2>
+        <div class="flex">
+            <span class="text-muted">可用Cookie: <strong id="active-count">{{ active_count }}</strong> / {{ total }}</span>
+            <button class="btn btn-primary" onclick="showAddModal()">添加Cookie</button>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Cookie列表</h2>
+    <table class="table">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>名称</th>
+                <th>Cookie值</th>
+                <th>状态</th>
+                <th>成功次数</th>
+                <th>失败次数</th>
+                <th>最后使用</th>
+                <th>备注</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody id="cookie-list">
+            {% for cookie in cookies %}
+            <tr id="cookie-{{ cookie.id }}">
+                <td>{{ cookie.id }}</td>
+                <td>{{ cookie.name }}</td>
+                <td>
+                    <code title="{{ cookie.cookie_value }}">{{ cookie.cookie_value[:30] }}{% if cookie.cookie_value|length > 30 %}...{% endif %}</code>
+                </td>
+                <td>
+                    {% if cookie.is_active %}
+                    <span class="status status-completed">启用</span>
+                    {% else %}
+                    <span class="status status-failed">禁用</span>
+                    {% endif %}
+                </td>
+                <td class="text-success">{{ cookie.success_count }}</td>
+                <td class="text-danger">{{ cookie.fail_count }}</td>
+                <td>
+                    {% if cookie.last_used_at %}
+                    {{ cookie.last_used_at.strftime('%Y-%m-%d %H:%M') }}
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+                <td>{{ cookie.remark or '-' }}</td>
+                <td>
+                    <button class="btn btn-sm btn-primary" onclick="editCookie({{ cookie.id }}, '{{ cookie.name }}', '{{ cookie.cookie_value }}', '{{ cookie.remark or '' }}')">编辑</button>
+                    <button class="btn btn-sm {% if cookie.is_active %}btn-warning{% else %}btn-success{% endif %}" onclick="toggleCookie({{ cookie.id }})">
+                        {% if cookie.is_active %}禁用{% else %}启用{% endif %}
+                    </button>
+                    <button class="btn btn-sm btn-danger" onclick="deleteCookie({{ cookie.id }}, '{{ cookie.name }}')">删除</button>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="9" class="text-center text-muted">暂无Cookie，请点击"添加Cookie"添加</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="card">
+    <h2>使用说明</h2>
+    <div class="text-muted">
+        <p><strong>如何获取Cookie:</strong></p>
+        <ol>
+            <li>在浏览器中登录 LetPub 网站</li>
+            <li>打开浏览器开发者工具 (F12) -> Application -> Cookies</li>
+            <li>复制 <code>PHPSESSID</code> 的值</li>
+            <li>将Cookie值添加到这里，格式: <code>PHPSESSID=xxxxxx</code> 或直接输入值</li>
+        </ol>
+
+        <p><strong>Worker配置:</strong></p>
+        <p>Worker节点需要配置 <code>MASTER_URL</code> 环境变量，指向Master服务器地址：</p>
+        <pre>MASTER_URL=http://master-server:8000</pre>
+
+        <p><strong>Cookie使用逻辑:</strong></p>
+        <ul>
+            <li>Worker请求评论时，会从Master随机选择一个可用Cookie</li>
+            <li>请求成功/失败后会自动更新统计信息</li>
+            <li>失败次数过多的Cookie建议手动禁用或删除</li>
+        </ul>
+    </div>
+</div>
+
+<!-- 添加/编辑Cookie模态框 -->
+<div id="cookie-modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1000;">
+    <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: white; padding: 30px; border-radius: 8px; width: 500px; max-width: 90%;">
+        <h3 id="modal-title" style="margin-bottom: 20px;">添加Cookie</h3>
+        <form id="cookie-form" onsubmit="saveCookie(event)">
+            <input type="hidden" id="cookie-id" value="">
+            <div class="form-group">
+                <label>名称 *</label>
+                <input type="text" id="cookie-name" required placeholder="例如: 账号1">
+            </div>
+            <div class="form-group">
+                <label>Cookie值 *</label>
+                <input type="text" id="cookie-value" required placeholder="PHPSESSID=xxxxx 或直接输入值">
+            </div>
+            <div class="form-group">
+                <label>备注</label>
+                <textarea id="cookie-remark" placeholder="可选备注信息"></textarea>
+            </div>
+            <div class="flex" style="justify-content: flex-end; gap: 10px;">
+                <button type="button" class="btn" onclick="hideModal()" style="background: #eee;">取消</button>
+                <button type="submit" class="btn btn-primary">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function showAddModal() {
+        document.getElementById('modal-title').textContent = '添加Cookie';
+        document.getElementById('cookie-id').value = '';
+        document.getElementById('cookie-name').value = '';
+        document.getElementById('cookie-value').value = '';
+        document.getElementById('cookie-remark').value = '';
+        document.getElementById('cookie-modal').style.display = 'block';
+    }
+
+    function editCookie(id, name, value, remark) {
+        document.getElementById('modal-title').textContent = '编辑Cookie';
+        document.getElementById('cookie-id').value = id;
+        document.getElementById('cookie-name').value = name;
+        document.getElementById('cookie-value').value = value;
+        document.getElementById('cookie-remark').value = remark;
+        document.getElementById('cookie-modal').style.display = 'block';
+    }
+
+    function hideModal() {
+        document.getElementById('cookie-modal').style.display = 'none';
+    }
+
+    async function saveCookie(event) {
+        event.preventDefault();
+
+        const id = document.getElementById('cookie-id').value;
+        const data = {
+            name: document.getElementById('cookie-name').value,
+            cookie_value: document.getElementById('cookie-value').value,
+            remark: document.getElementById('cookie-remark').value || null
+        };
+
+        const url = id ? `/api/cookies/${id}` : '/api/cookies';
+        const method = id ? 'PUT' : 'POST';
+
+        try {
+            const response = await fetch(url, {
+                method: method,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+
+            if (response.ok) {
+                hideModal();
+                location.reload();
+            } else {
+                const result = await response.json();
+                alert('保存失败: ' + (result.detail || '未知错误'));
+            }
+        } catch (error) {
+            alert('请求失败: ' + error.message);
+        }
+    }
+
+    async function toggleCookie(id) {
+        try {
+            const response = await fetch(`/api/cookies/${id}/toggle`, { method: 'POST' });
+            if (response.ok) {
+                location.reload();
+            } else {
+                const result = await response.json();
+                alert('操作失败: ' + (result.detail || '未知错误'));
+            }
+        } catch (error) {
+            alert('请求失败: ' + error.message);
+        }
+    }
+
+    async function deleteCookie(id, name) {
+        if (!confirm(`确定要删除Cookie "${name}" 吗？`)) return;
+
+        try {
+            const response = await fetch(`/api/cookies/${id}`, { method: 'DELETE' });
+            if (response.ok) {
+                location.reload();
+            } else {
+                const result = await response.json();
+                alert('删除失败: ' + (result.detail || '未知错误'));
+            }
+        } catch (error) {
+            alert('请求失败: ' + error.message);
+        }
+    }
+
+    // 点击模态框外部关闭
+    document.getElementById('cookie-modal').addEventListener('click', function(e) {
+        if (e.target === this) {
+            hideModal();
+        }
+    });
+</script>
+{% endblock %}

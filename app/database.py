@@ -34,5 +34,5 @@ def get_db():
 
 def init_db():
     """初始化数据库表"""
-    from app.models import Category, Journal, Comment, CrawlTask
+    from app.models import Category, Journal, Comment, CrawlTask, CookiePool
     Base.metadata.create_all(bind=engine)

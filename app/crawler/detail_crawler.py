@@ -2,6 +2,7 @@ import re
 import logging
 import json
 import math
+import httpx
 from typing import Dict, List, Optional, Any
 
 import lxml.etree
@@ -445,9 +446,49 @@ class DetailCrawler(BaseCrawler):
 
         return normalized
 
+    async def _get_random_cookie_from_master(self) -> Optional[Dict]:
+        """从Master服务器获取随机Cookie"""
+        if not config.MASTER_URL:
+            return None
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(f"{config.MASTER_URL}/api/cookies/random")
+                if response.status_code == 200:
+                    data = response.json()
+                    return {
+                        "id": data.get("id"),
+                        "cookie_value": data.get("cookie_value")
+                    }
+                elif response.status_code == 404:
+                    logger.warning("Master服务器没有可用的Cookie")
+                else:
+                    logger.warning(f"获取随机Cookie失败: HTTP {response.status_code}")
+        except Exception as e:
+            logger.error(f"从Master获取Cookie失败: {e}")
+
+        return None
+
+    async def _report_cookie_result(self, cookie_id: int, success: bool):
+        """向Master服务器报告Cookie使用结果"""
+        if not config.MASTER_URL or not cookie_id:
+            return
+
+        try:
+            endpoint = "report-success" if success else "report-fail"
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(f"{config.MASTER_URL}/api/cookies/{cookie_id}/{endpoint}")
+        except Exception as e:
+            logger.warning(f"报告Cookie结果失败: {e}")
+
     async def _fetch_comments_from_api(self, journal_id: int) -> List[Dict]:
-        """通过AJAX API获取评论数据（更高效的方式）"""
+        """通过AJAX API获取评论数据（更高效的方式）
+
+        优先从Master服务器获取随机Cookie来发起请求，
+        如果没有配置Master或获取失败，则使用本地配置的Cookie或浏览器Cookie。
+        """
         comments = []
+        cookie_info = None  # 用于记录使用的cookie信息
 
         try:
             comment_ele = self.page.locator("xpath=//td/h2/font")
@@ -462,6 +503,21 @@ class DetailCrawler(BaseCrawler):
             page = 1
             max_pages = page_nums  # 限制最大页数，防止无限循环
 
+            # 尝试从Master获取随机Cookie
+            cookie_info = await self._get_random_cookie_from_master()
+
+            # 确定使用的Cookie值
+            cookie_value = None
+            if cookie_info:
+                cookie_value = cookie_info.get("cookie_value")
+                logger.info(f"使用Master服务器Cookie (ID: {cookie_info.get('id')})")
+            elif config.LETPUB_COOKIE:
+                cookie_value = config.LETPUB_COOKIE
+                logger.info("使用本地配置Cookie")
+
+            # 决定请求方式：有cookie时用httpx，否则用浏览器
+            use_httpx = bool(cookie_value)
+
             while page <= max_pages:
                 # 构建请求参数
                 params = {
@@ -474,30 +530,28 @@ class DetailCrawler(BaseCrawler):
                 logger.info(f"获取评论第 {page} 页 (journal_id={journal_id})")
 
                 try:
-                    # 使用page的fetch API发起请求
-                    response = await self.page.evaluate('''async (args) => {
-                        const url = new URL(args.url);
-                        Object.keys(args.params).forEach(key =>
-                            url.searchParams.append(key, args.params[key])
-                        );
-                        
-                        const response = await fetch(url.toString(), {
-                        credentials: 'include',  // 包含cookie
-                        headers: {
-                            'Accept': 'application/json, text/javascript, */*; q=0.01',
-                            'X-Requested-With': 'XMLHttpRequest'
-                        }
-                    });
-                        const text = await response.text();
-                        return text;
-                    }''', {"url": api_url, "params": params})
+                    response_text = None
+
+                    if use_httpx:
+                        # 使用httpx发起请求（带自定义Cookie）
+                        response_text = await self._fetch_with_httpx(api_url, params, cookie_value)
+                    else:
+                        # 使用浏览器发起请求（使用浏览器Cookie）
+                        response_text = await self._fetch_with_browser(api_url, params)
+
+                    if not response_text:
+                        logger.warning("获取评论响应为空")
+                        break
 
                     # 解析JSON响应
-                    data = json.loads(response)
+                    data = json.loads(response_text)
 
                     # 检查响应状态
                     if data.get("code") != 0:
                         logger.warning(f"API返回错误: {data.get('msg', 'Unknown error')}")
+                        # 报告Cookie失败
+                        if cookie_info:
+                            await self._report_cookie_result(cookie_info.get("id"), False)
                         break
 
                     # 提取评论数据
@@ -510,7 +564,7 @@ class DetailCrawler(BaseCrawler):
                     # 解析每条评论  每条评论是一个div字符串需要处理
                     for item in comment_data:
                         try:
-                            comment = self._parse_comment_from_api(journal_id,item)
+                            comment = self._parse_comment_from_api(journal_id, item)
                             if comment:
                                 comments.append(comment)
                         except Exception as e:
@@ -532,19 +586,79 @@ class DetailCrawler(BaseCrawler):
 
                 except json.JSONDecodeError as e:
                     logger.error(f"解析JSON失败: {e}")
+                    # 报告Cookie失败
+                    if cookie_info:
+                        await self._report_cookie_result(cookie_info.get("id"), False)
                     # 如果API不可用，降级使用页面爬取
                     logger.info("API获取失败，尝试从页面提取评论")
                     return await self._extract_comments()
+
+            # 成功获取评论，报告Cookie成功
+            if cookie_info and comments:
+                await self._report_cookie_result(cookie_info.get("id"), True)
 
             logger.info(f"通过API共获取 {len(comments)} 条评论")
 
         except Exception as e:
             logger.error(f"API获取评论失败: {e}")
+            # 报告Cookie失败
+            if cookie_info:
+                await self._report_cookie_result(cookie_info.get("id"), False)
             # 降级使用页面爬取
             logger.info("降级使用页面爬取方式")
             return await self._extract_comments()
 
         return comments
+
+    async def _fetch_with_httpx(self, api_url: str, params: Dict, cookie_value: str) -> Optional[str]:
+        """使用httpx发起请求（带自定义Cookie）"""
+        try:
+            # 构建Cookie字符串
+            # cookie_value 格式可能是 "PHPSESSID=xxx" 或纯值 "xxx"
+            if "=" in cookie_value:
+                cookie_header = cookie_value
+            else:
+                cookie_header = f"PHPSESSID={cookie_value}"
+
+            headers = {
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "X-Requested-With": "XMLHttpRequest",
+                "Cookie": cookie_header,
+                "Referer": config.BASE_URL,
+                "User-Agent": config.USER_AGENTS[0]
+            }
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(api_url, params=params, headers=headers)
+                return response.text
+
+        except Exception as e:
+            logger.error(f"httpx请求失败: {e}")
+            return None
+
+    async def _fetch_with_browser(self, api_url: str, params: Dict) -> Optional[str]:
+        """使用浏览器发起请求（使用浏览器Cookie）"""
+        try:
+            response = await self.page.evaluate('''async (args) => {
+                const url = new URL(args.url);
+                Object.keys(args.params).forEach(key =>
+                    url.searchParams.append(key, args.params[key])
+                );
+
+                const response = await fetch(url.toString(), {
+                    credentials: 'include',
+                    headers: {
+                        'Accept': 'application/json, text/javascript, */*; q=0.01',
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                });
+                const text = await response.text();
+                return text;
+            }''', {"url": api_url, "params": params})
+            return response
+        except Exception as e:
+            logger.error(f"浏览器请求失败: {e}")
+            return None
 
     def _parse_comment_from_api(self, journal_id:str,item: Dict) -> Optional[Dict]:
         """解析API返回的单条评论数据"""

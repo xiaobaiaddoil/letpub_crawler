@@ -11,7 +11,7 @@ from pathlib import Path
 
 from app.config import config
 from app.database import init_db, get_db, SessionLocal
-from app.api import tasks, data, workers
+from app.api import tasks, data, workers, cookies
 from app.services.crawler_service import crawler_service
 from app.services.task_manager import TaskManager
 from app.logging_config import setup_app_logging, clean_old_logs
@@ -113,6 +113,7 @@ app = FastAPI(
 app.include_router(tasks.router)
 app.include_router(data.router)
 app.include_router(workers.router)
+app.include_router(cookies.router)
 
 # 爬虫控制API
 @app.post("/api/crawler/start")
@@ -301,6 +302,22 @@ async def workers_page(request: Request, db: Session = Depends(get_db)):
         "request": request,
         "workers": workers_data,
         "run_mode": RUN_MODE
+    })
+
+
+@app.get("/cookies", response_class=HTMLResponse)
+async def cookies_page(request: Request, db: Session = Depends(get_db)):
+    """Cookie池管理页面"""
+    from app.models.cookie_pool import CookiePool
+
+    cookies_list = db.query(CookiePool).order_by(CookiePool.created_at.desc()).all()
+    active_count = db.query(CookiePool).filter(CookiePool.is_active == True).count()
+
+    return templates.TemplateResponse("cookies.html", {
+        "request": request,
+        "cookies": cookies_list,
+        "total": len(cookies_list),
+        "active_count": active_count
     })
 
 if __name__ == "__main__":
