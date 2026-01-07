@@ -180,8 +180,30 @@
         }
         .text-muted { color: #6c757d; }
         .text-small { font-size: 12px; }
+        .text-success { color: #28a745; }
+        .text-danger { color: #dc3545; }
+        .text-center { text-align: center; }
         .mt-2 { margin-top: 10px; }
         .mb-2 { margin-bottom: 10px; }
+        .btn-small {
+            padding: 5px 10px;
+            font-size: 12px;
+        }
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 12px;
+        }
+        pre {
+            background: #f4f4f4;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 13px;
+        }
         .pagination {
             display: flex;
             gap: 5px;
@@ -210,6 +232,7 @@
                 <a href="/" class="{% if request.url.path == '/' %}active{% endif %}">控制面板</a>
                 <a href="/tasks" class="{% if request.url.path == '/tasks' %}active{% endif %}">任务管理</a>
                 <a href="/journals" class="{% if request.url.path == '/journals' %}active{% endif %}">期刊数据</a>
+                <a href="/workers" class="{% if request.url.path == '/workers' %}active{% endif %}">Worker管理</a>
             </nav>
         </div>
     </header>

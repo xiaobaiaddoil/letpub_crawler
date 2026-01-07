@@ -1,6 +1,7 @@
 """
 日志配置模块
 支持：
+- 从配置文件加载（logging.conf）或代码配置
 - 分级别文件存储（INFO、WARNING、ERROR）
 - 控制台彩色输出
 - 日志轮转
@@ -11,22 +12,11 @@ import logging
 import logging.handlers
 from pathlib import Path
 from datetime import datetime
-from app.config import config
+
 
 # 日志目录
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
-
-# 日志格式
-DETAILED_FORMAT = logging.Formatter(
-    fmt='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-
-SIMPLE_FORMAT = logging.Formatter(
-    fmt='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%H:%M:%S'
-)
 
 
 class ColoredFormatter(logging.Formatter):
@@ -48,37 +38,41 @@ class ColoredFormatter(logging.Formatter):
         return super().format(record)
 
 
-def setup_logger(name: str = None, level: int = logging.INFO) -> logging.Logger:
+def setup_app_logging(debug: bool = False, console_level: str = "WARNING"):
     """
-    设置日志记录器
+    初始化应用程序日志系统
 
     Args:
-        name: 日志记录器名称，None表示根记录器
-        level: 日志级别
-
-    Returns:
-        配置好的日志记录器
+        debug: 是否启用DEBUG级别日志
+        console_level: 控制台日志级别 (DEBUG/INFO/WARNING/ERROR)
     """
-    logger = logging.getLogger(name)
-    logger.setLevel(level)
+    level = logging.DEBUG if debug else logging.INFO
 
-    # 避免重复添加处理器
-    if logger.handlers:
-        return logger
+    # 详细格式
+    detailed_format = logging.Formatter(
+        fmt='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
 
-    # 1. 控制台处理器（彩色输出，INFO及以上）
+    # 根日志记录器
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+
+    # 清除已有的处理器
+    root_logger.handlers.clear()
+
+    # 1. 控制台处理器（彩色输出）
     console_handler = logging.StreamHandler()
-    # 
-    
-    console_handler.setLevel(logging.WARNING)
+    console_level_value = getattr(logging, console_level.upper(), logging.WARNING)
+    console_handler.setLevel(console_level_value)
     console_formatter = ColoredFormatter(
         fmt='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         datefmt='%H:%M:%S'
     )
     console_handler.setFormatter(console_formatter)
-    logger.addHandler(console_handler)
+    root_logger.addHandler(console_handler)
 
-    # 2. INFO 级别文件处理器（所有INFO及以上日志）
+    # 2. INFO 级别文件处理器
     info_file = LOG_DIR / f"info_{datetime.now().strftime('%Y%m%d')}.log"
     info_handler = logging.handlers.RotatingFileHandler(
         info_file,
@@ -87,82 +81,57 @@ def setup_logger(name: str = None, level: int = logging.INFO) -> logging.Logger:
         encoding='utf-8'
     )
     info_handler.setLevel(logging.INFO)
-    info_handler.setFormatter(DETAILED_FORMAT)
-    logger.addHandler(info_handler)
+    info_handler.setFormatter(detailed_format)
+    root_logger.addHandler(info_handler)
 
-    # 3. WARNING 级别文件处理器（WARNING及以上）
+    # 3. WARNING 级别文件处理器
     warning_file = LOG_DIR / f"warning_{datetime.now().strftime('%Y%m%d')}.log"
     warning_handler = logging.handlers.RotatingFileHandler(
         warning_file,
-        maxBytes=10 * 1024 * 1024,  # 10MB
+        maxBytes=10 * 1024 * 1024,
         backupCount=5,
         encoding='utf-8'
     )
     warning_handler.setLevel(logging.WARNING)
-    warning_handler.setFormatter(DETAILED_FORMAT)
-    logger.addHandler(warning_handler)
+    warning_handler.setFormatter(detailed_format)
+    root_logger.addHandler(warning_handler)
 
-    # 4. ERROR 级别文件处理器（ERROR及以上，包含完整堆栈）
+    # 4. ERROR 级别文件处理器
     error_file = LOG_DIR / f"error_{datetime.now().strftime('%Y%m%d')}.log"
     error_handler = logging.handlers.RotatingFileHandler(
         error_file,
-        maxBytes=10 * 1024 * 1024,  # 10MB
-        backupCount=10,  # ERROR日志保留更多备份
+        maxBytes=10 * 1024 * 1024,
+        backupCount=10,
         encoding='utf-8'
     )
     error_handler.setLevel(logging.ERROR)
-    error_handler.setFormatter(DETAILED_FORMAT)
-    logger.addHandler(error_handler)
+    error_handler.setFormatter(detailed_format)
+    root_logger.addHandler(error_handler)
 
-    # 5. DEBUG 文件处理器（开发调试用，可选）
-    if level == logging.DEBUG:
+    # 5. DEBUG 文件处理器（仅在DEBUG模式）
+    if debug:
         debug_file = LOG_DIR / f"debug_{datetime.now().strftime('%Y%m%d')}.log"
         debug_handler = logging.handlers.RotatingFileHandler(
             debug_file,
-            maxBytes=20 * 1024 * 1024,  # 20MB
+            maxBytes=20 * 1024 * 1024,
             backupCount=3,
             encoding='utf-8'
         )
         debug_handler.setLevel(logging.DEBUG)
-        debug_handler.setFormatter(DETAILED_FORMAT)
-        logger.addHandler(debug_handler)
-
-    return logger
-
-
-def setup_app_logging(debug: bool = False):
-    """
-    初始化应用程序日志系统
-
-    Args:
-        debug: 是否启用DEBUG级别日志
-    """
-    level = logging.DEBUG if debug else logging.INFO
-
-    # 设置根日志记录器
-    root_logger = setup_logger(None, level)
-
-    # 设置各模块的日志记录器
-    modules = [
-        'app.crawler',
-        'app.services',
-        'app.models',
-        'app.api',
-    ]
-
-    for module in modules:
-        setup_logger(module, level)
+        debug_handler.setFormatter(detailed_format)
+        root_logger.addHandler(debug_handler)
 
     # 降低第三方库的日志级别
     logging.getLogger('urllib3').setLevel(logging.WARNING)
     logging.getLogger('selenium').setLevel(logging.WARNING)
     logging.getLogger('asyncio').setLevel(logging.WARNING)
+    logging.getLogger('playwright').setLevel(logging.WARNING)
 
     root_logger.info(f"日志系统初始化完成，级别: {logging.getLevelName(level)}")
+    root_logger.info(f"控制台日志级别: {console_level.upper()}")
     root_logger.info(f"日志文件保存至: {LOG_DIR.absolute()}")
 
 
-# 清理旧日志文件的工具函数
 def clean_old_logs(days: int = 7):
     """
     清理指定天数之前的日志文件
@@ -199,7 +168,7 @@ def clean_old_logs(days: int = 7):
 
 if __name__ == "__main__":
     # 测试日志配置
-    setup_app_logging(debug=True)
+    setup_app_logging(debug=True, console_level="INFO")
 
     logger = logging.getLogger(__name__)
 
@@ -210,7 +179,7 @@ if __name__ == "__main__":
 
     try:
         1 / 0
-    except Exception as e:
+    except Exception:
         logger.exception("捕获到异常")
 
     print(f"\n日志文件已保存到: {LOG_DIR.absolute()}")

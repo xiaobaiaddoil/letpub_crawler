@@ -17,6 +17,8 @@ class TaskResponse(BaseModel):
     status: str
     retry_count: int
     error_message: Optional[str]
+    worker_id: Optional[str]  # 执行该任务的worker标识
+    locked_at: Optional[datetime]  # 任务锁定时间
     created_at: datetime
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
@@ -118,3 +120,70 @@ def reset_all_detail_tasks(db: Session = Depends(get_db)):
     task_manager = TaskManager(db)
     count = task_manager.reset_all_detail_tasks()
     return {"message": f"已重置 {count} 个详情任务"}
+
+@router.post("/{task_id}/re-crawl")
+def re_crawl_task(task_id: int, db: Session = Depends(get_db)):
+    """重新爬取任务（无论当前状态）"""
+    task = db.query(CrawlTask).filter(CrawlTask.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    # 重置任务状态
+    task.status = TaskStatus.PENDING.value
+    task.retry_count = 0
+    task.error_message = None
+    task.worker_id = None
+    task.locked_at = None
+    task.started_at = None
+    task.completed_at = None
+    db.commit()
+
+    return {"message": "任务已重置为待处理状态"}
+
+@router.get("/workers")
+def get_active_workers(db: Session = Depends(get_db)):
+    """获取活跃的worker列表"""
+    from sqlalchemy import func
+    from datetime import datetime, timedelta, timezone
+
+    # 获取最近5分钟内有活动的worker
+    threshold = datetime.now(timezone.utc) - timedelta(minutes=5)
+
+    workers = db.query(
+        CrawlTask.worker_id,
+        func.count(CrawlTask.id).label('task_count'),
+        func.max(CrawlTask.locked_at).label('last_active')
+    ).filter(
+        CrawlTask.worker_id.isnot(None),
+        CrawlTask.locked_at >= threshold
+    ).group_by(
+        CrawlTask.worker_id
+    ).all()
+
+    return {
+        "workers": [
+            {
+                "worker_id": w.worker_id,
+                "task_count": w.task_count,
+                "last_active": w.last_active
+            }
+            for w in workers
+        ]
+    }
+
+@router.post("/batch-retry")
+def batch_retry_tasks(
+    task_ids: List[int],
+    db: Session = Depends(get_db)
+):
+    """批量重试任务"""
+    task_manager = TaskManager(db)
+    retried = 0
+
+    for task_id in task_ids:
+        task = db.query(CrawlTask).filter(CrawlTask.id == task_id).first()
+        if task and task.status == TaskStatus.FAILED.value:
+            if task_manager.retry_task(task):
+                retried += 1
+
+    return {"message": f"已重试 {retried}/{len(task_ids)} 个任务"}

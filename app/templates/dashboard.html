@@ -5,6 +5,7 @@
     <div class="flex-between">
         <h2>爬虫控制</h2>
         <div class="flex">
+            <span class="text-muted" style="margin-right: 10px;">模式: {{ run_mode or 'standalone' }}</span>
             <span id="crawler-status" class="status {% if crawler_status.paused %}status-pending{% elif crawler_status.running %}status-running{% else %}status-failed{% endif %}">
                 {% if crawler_status.paused %}已暂停{% elif crawler_status.running %}运行中{% else %}已停止{% endif %}
             </span>
@@ -12,8 +13,10 @@
     </div>
     <div class="flex mt-2">
         <button class="btn btn-primary" onclick="startCrawler()">开始爬取</button>
+        {% if run_mode != 'master' %}
         <button class="btn btn-warning" onclick="pauseCrawler()">暂停</button>
         <button class="btn btn-success" onclick="resumeCrawler()">恢复</button>
+        {% endif %}
     </div>
 </div>
 
@@ -62,6 +65,25 @@
         </div>
     </div>
 </div>
+
+{% if worker_stats %}
+<div class="card">
+    <div class="flex-between">
+        <h2>Worker节点</h2>
+        <a href="/workers" class="btn btn-small">查看详情</a>
+    </div>
+    <div class="stats-grid">
+        <div class="stat-item">
+            <div class="stat-value {% if worker_stats.online > 0 %}text-success{% else %}text-danger{% endif %}">{{ worker_stats.online }}</div>
+            <div class="stat-label">在线节点</div>
+        </div>
+        <div class="stat-item">
+            <div class="stat-value">{{ worker_stats.total }}</div>
+            <div class="stat-label">总节点数</div>
+        </div>
+    </div>
+</div>
+{% endif %}
 
 <div class="card">
     <h2>Cookie配置</h2>

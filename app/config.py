@@ -10,8 +10,11 @@ if env_path.exists():
 class Config:
     # 应用配置
     DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"
+    CONSOLE_LOG_LEVEL: str = os.getenv("CONSOLE_LOG_LEVEL", "WARNING").upper()
 
-    CONSOLE_LOGGER_LEVEL: bool = os.getenv("DEBUG", "false").lower() == "true"
+    # 运行模式: master(主服务器-管理界面) / worker(从服务器-爬虫) / standalone(单机模式)
+    RUN_MODE: str = os.getenv("RUN_MODE", "standalone").lower()
+
     # 数据库配置
     DATABASE_URL: str = os.getenv(
         "DATABASE_URL",
@@ -22,10 +25,13 @@ class Config:
     CRAWL_DELAY_MIN: int = int(os.getenv("CRAWL_DELAY_MIN", "3"))
     CRAWL_DELAY_MAX: int = int(os.getenv("CRAWL_DELAY_MAX", "8"))
     MAX_RETRY: int = int(os.getenv("MAX_RETRY", "3"))
+    BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "5"))  # 每次获取任务数量
 
     # 分布式配置
     WORKER_ID: str = os.getenv("WORKER_ID", "")  # 可手动指定worker标识，为空则自动生成
     TASK_LOCK_TIMEOUT: int = int(os.getenv("TASK_LOCK_TIMEOUT", "300"))  # 任务锁定超时时间（秒）
+    HEARTBEAT_INTERVAL: int = int(os.getenv("HEARTBEAT_INTERVAL", "30"))  # 心跳间隔（秒）
+    WORKER_TIMEOUT: int = int(os.getenv("WORKER_TIMEOUT", "120"))  # Worker超时时间（秒）
 
     # Cookie配置
     LETPUB_COOKIE: str = os.getenv("LETPUB_COOKIE", "")
