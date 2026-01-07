@@ -38,6 +38,32 @@ setup_app_logging(debug=config.DEBUG, console_level=config.CONSOLE_LOG_LEVEL)
 logger = logging.getLogger("worker")
 
 
+def clean_numeric_value(value):
+    """清洗数值字段，将无效值转换为 None
+
+    处理常见的无效值如: "-", "N/A", "", None, 非数字字符串
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        value = value.strip()
+        # 无效值列表
+        if value in ["-", "N/A", "n/a", "", "--", "无", "暂无"]:
+            return None
+        # 尝试提取数字
+        import re
+        match = re.search(r'[\d.]+', value)
+        if match:
+            try:
+                return float(match.group())
+            except ValueError:
+                return None
+        return None
+    return None
+
+
 class DistributedWorker:
     """分布式爬虫Worker"""
 
@@ -347,8 +373,9 @@ class DistributedWorker:
                         journal.issn = basic_info.get("issn", journal.issn)
                         journal.eissn = basic_info.get("E-ISSN")
 
-                        journal.impact_factor = basic_info.get("impact_factor", journal.impact_factor)
-                        journal.impact_factor_realtime = basic_info.get("impact_factor_realtime")
+                        # 数值字段需要清洗，防止无效值（如"-"）导致数据库错误
+                        journal.impact_factor = clean_numeric_value(basic_info.get("impact_factor")) or journal.impact_factor
+                        journal.impact_factor_realtime = clean_numeric_value(basic_info.get("impact_factor_realtime"))
                         journal.self_citation_rate = basic_info.get("self_citation_rate")
 
                         journal.jcr_partition = basic_info.get("jcr_partition")
