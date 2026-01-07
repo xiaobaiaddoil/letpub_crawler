@@ -522,18 +522,34 @@ async def main():
 
     worker = DistributedWorker(worker_id=args.worker_id if args.worker_id else None)
 
+    # 创建主任务
+    main_task = asyncio.create_task(worker.run())
+
     # 处理信号
     import signal
+    import sys
 
     def signal_handler(signum, frame):
-        logger.info(f"收到信号 {signum}")
+        logger.info(f"收到信号 {signum}，正在停止...")
         worker.stop()
+        # 给一些时间让当前操作完成
+        # 如果再次收到信号则强制退出
+        signal.signal(signal.SIGINT, lambda _, __: sys.exit(1))
+        signal.signal(signal.SIGTERM, lambda _, __: sys.exit(1))
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    await worker.run()
+    try:
+        await main_task
+    except asyncio.CancelledError:
+        logger.info("主任务被取消")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("程序被用户中断")
+    except SystemExit:
+        pass

@@ -4,7 +4,7 @@ import json
 import math
 import httpx
 from typing import Dict, List, Optional, Any
-
+import uuid
 import lxml.etree
 from app.crawler.base import BaseCrawler
 from app.config import config
@@ -440,7 +440,8 @@ class DetailCrawler(BaseCrawler):
                                 value = float(match.group(0))
                             except:
                                 pass
-
+                        else:
+                            value = None         
                     normalized[normalized_key] = value
                     break
 
@@ -772,10 +773,14 @@ class DetailCrawler(BaseCrawler):
                 "comment_time": publish_time or update_time,  # 优先使用 publish_time
             }
 
-            # 生成唯一ID
+
             author_name = comment.get("author", "anonymous")
             time_str = comment.get("comment_time", "")
-            comment["comment_id"] = str(hash(f"{journal_id}_{floor}_{author_name}"))
+            # 生成唯一ID
+            namespace = uuid.NAMESPACE_DNS
+            secure_name_uuid = uuid.uuid5(namespace, f"{journal_id}_{floor}_{author_name}")
+            
+            comment["comment_id"] = secure_name_uuid
 
             return comment
 
