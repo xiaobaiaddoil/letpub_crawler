@@ -56,37 +56,67 @@ RUN_MODE = config.RUN_MODE  # master / worker / standalone
 
 
 async def proxy_auto_refresh_loop():
-    """代理自动刷新后台任务"""
+    """代理自动刷新后台任务 - 直接从 proxy.yaml 配置获取代理"""
     from app.services.proxy_service import ProxyService
     
-    # 首次启动时从配置文件初始化代理
+    # 获取刷新间隔配置
+    proxy_cfg = config.proxy_config
+    auto_refresh_cfg = proxy_cfg.get("auto_refresh", {})
+    refresh_enabled = auto_refresh_cfg.get("enabled", False)
+    refresh_interval = auto_refresh_cfg.get("interval", 300)  # 默认5分钟
+    
+    if not refresh_enabled:
+        logger.info("[代理] 自动刷新未启用")
+        # 仅首次初始化，不循环刷新
+        try:
+            db = SessionLocal()
+            try:
+                service = ProxyService(db)
+                result = await service.fetch_proxies_from_config()
+                if result["tunnel"] > 0 or result["private"] > 0:
+                    logger.info(f"[代理] 初始化完成: 隧道 {result['tunnel']} 个, 私密 {result['private']} 个")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"[代理] 初始化失败: {e}")
+        return
+    
+    logger.info(f"[代理] 自动刷新已启用，间隔 {refresh_interval} 秒")
+    
+    # 首次立即获取
     try:
         db = SessionLocal()
         try:
             service = ProxyService(db)
-            result = await service.init_from_env()
+            result = await service.fetch_proxies_from_config()
             if result["tunnel"] > 0 or result["private"] > 0:
-                logger.info(f"从配置文件初始化代理: 隧道 {result['tunnel']} 个, 私密 {result['private']} 个")
+                logger.info(f"[代理] 初始化完成: 隧道 {result['tunnel']} 个, 私密 {result['private']} 个")
         finally:
             db.close()
     except Exception as e:
-        logger.error(f"从配置文件初始化代理失败: {e}")
+        logger.error(f"[代理] 初始化失败: {e}")
     
+    # 定期刷新循环
     while True:
         try:
-            await asyncio.sleep(60)  # 每分钟检查一次
+            await asyncio.sleep(refresh_interval)
+            
+            # 重新读取配置（支持热更新）
+            config.reload()
+            proxy_cfg = config.proxy_config
+            
             db = SessionLocal()
             try:
                 service = ProxyService(db)
-                result = await service.auto_refresh_proxies()
-                if result["added_proxies"] > 0:
-                    logger.info(f"代理自动刷新: 刷新了 {result['refreshed_configs']} 个配置，添加 {result['added_proxies']} 个代理")
+                result = await service.fetch_proxies_from_config()
+                if result["tunnel"] > 0 or result["private"] > 0:
+                    logger.info(f"[代理] 自动刷新: 隧道 {result['tunnel']} 个, 私密 {result['private']} 个")
             finally:
                 db.close()
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.error(f"代理自动刷新失败: {e}")
+            logger.error(f"[代理] 自动刷新失败: {e}")
 
 
 @asynccontextmanager

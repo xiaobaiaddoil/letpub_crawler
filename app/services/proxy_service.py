@@ -595,3 +595,51 @@ class ProxyService:
                 logger.error(f"初始化私密代理失败: {e}")
         
         return result
+
+    async def fetch_proxies_from_config(self) -> Dict[str, int]:
+        """直接从 proxy.yaml 配置文件获取代理（不依赖数据库配置）
+        
+        Returns:
+            {"tunnel": 隧道代理数, "private": 私密代理数}
+        """
+        result = {"tunnel": 0, "private": 0}
+        proxy_cfg = config.proxy_config
+        
+        if not proxy_cfg:
+            logger.warning("[代理] proxy.yaml 配置为空")
+            return result
+        
+        # 获取隧道代理
+        tunnel_cfg = proxy_cfg.get("tunnel", {})
+        if tunnel_cfg.get("enabled"):
+            addr = tunnel_cfg.get("addr")
+            username = tunnel_cfg.get("username")
+            password = tunnel_cfg.get("password")
+            
+            if addr and username and password:
+                try:
+                    self.add_tunnel_proxy(addr, username, password, "yaml_tunnel")
+                    result["tunnel"] = 1
+                    logger.info(f"[代理] 隧道代理已添加: {addr}")
+                except Exception as e:
+                    logger.error(f"[代理] 添加隧道代理失败: {e}")
+        
+        # 获取私密代理
+        private_cfg = proxy_cfg.get("private", {})
+        if private_cfg.get("enabled"):
+            api_url = private_cfg.get("api_url")
+            username = private_cfg.get("username")
+            password = private_cfg.get("password")
+            
+            if api_url and username and password:
+                try:
+                    count = await self.fetch_private_proxies(
+                        api_url=api_url,
+                        username=username,
+                        password=password,
+                        remark="yaml_private"
+                    )
+                    result["private"] = count
+                    logger.info(f"[代理] 私密代理已获取: {count} 个")
+                except Exception as e:
+                    logger.error(f"[代理] 获取私密代理失败: {e}")
