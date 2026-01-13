@@ -231,7 +231,7 @@ class BaseCrawler(ABC):
         await asyncio.sleep(delay)
 
     async def goto(self, url: str, wait_until: str = "networkidle") -> bool:
-        """访问页面"""
+        """访问页面，代理失败自动切换直连重试"""
         proxy_info = self.get_proxy_display()
         try:
             logger.info(f"访问: {url} [代理: {proxy_info}]")
@@ -240,8 +240,26 @@ class BaseCrawler(ABC):
             return True
         except Exception as e:
             logger.error(f"访问页面失败: {url} [代理: {proxy_info}], 错误: {e}")
-            # 请求失败时自动报告代理失败
-            await self.report_proxy_result(success=False)
+            
+            # 如果使用代理失败，尝试切换直连重试
+            if self._current_proxy_info and not self._using_direct:
+                logger.warning(f"[代理] {proxy_info} 失败，切换直连重试...")
+                await self.report_proxy_result(success=False)
+                
+                # 关闭当前浏览器，用直连重新初始化
+                await self.close()
+                await self.init_browser(use_proxy=False)
+                
+                # 直连重试
+                try:
+                    logger.info(f"访问: {url} [直连重试]")
+                    await self.page.goto(url, wait_until=wait_until, timeout=60000)
+                    await self.random_delay()
+                    return True
+                except Exception as e2:
+                    logger.error(f"直连重试失败: {url}, 错误: {e2}")
+                    return False
+            
             return False
 
     async def scroll_to_load(self, scroll_times: int = 3, delay: float = 1.5):

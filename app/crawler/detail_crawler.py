@@ -638,42 +638,64 @@ class DetailCrawler(BaseCrawler):
         return comments
 
     async def _fetch_with_httpx(self, api_url: str, params: Dict, cookie_value: str) -> Optional[str]:
-        """使用httpx发起POST请求（带自定义Cookie）"""
+        """使用httpx发起POST请求（带自定义Cookie），代理失败自动切换直连重试"""
         proxy_info = self.get_proxy_display()
-        try:
-            # 构建Cookie字符串
-            if "=" in cookie_value:
-                cookie_header = cookie_value
+        
+        # 构建Cookie字符串
+        if "=" in cookie_value:
+            cookie_header = cookie_value
+        else:
+            cookie_header = f"PHPSESSID={cookie_value}"
+
+        headers = {
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "X-Requested-With": "XMLHttpRequest",
+            "Cookie": cookie_header,
+            "Origin": "https://www.letpub.com.cn",
+            "Referer": f"{config.BASE_URL}/index.php?journalid={params.get('journalid')}&page=journalapp&view=detail",
+            "User-Agent": config.USER_AGENTS[0],
+            "Content-Length": "0"
+        }
+
+        # 构建完整URL（参数放在URL中）
+        url_with_params = f"{api_url}?action={params['action']}&journalid={params['journalid']}&sorttype={params['sorttype']}&page={params['page']}"
+
+        # 构建代理URL
+        proxy_url = None
+        if self._current_proxy_info:
+            p = self._current_proxy_info
+            if p.get("username") and p.get("password"):
+                proxy_url = f"http://{p['username']}:{p['password']}@{p['ip']}:{p['port']}"
             else:
-                cookie_header = f"PHPSESSID={cookie_value}"
+                proxy_url = f"http://{p['ip']}:{p['port']}"
 
-            headers = {
-                "Accept": "application/json, text/javascript, */*; q=0.01",
-                "X-Requested-With": "XMLHttpRequest",
-                "Cookie": cookie_header,
-                "Origin": "https://www.letpub.com.cn",
-                "Referer": f"{config.BASE_URL}/index.php?journalid={params.get('journalid')}&page=journalapp&view=detail",
-                "User-Agent": config.USER_AGENTS[0],
-                "Content-Length": "0"
-            }
-
-            # 构建完整URL（参数放在URL中）
-            url_with_params = f"{api_url}?action={params['action']}&journalid={params['journalid']}&sorttype={params['sorttype']}&page={params['page']}"
-
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                # 使用 POST 请求，body 为空
+        try:
+            async with httpx.AsyncClient(timeout=30.0, proxy=proxy_url) as client:
                 response = await client.post(url_with_params, headers=headers, content="")
                 logger.debug(f"[API请求] {url_with_params} [代理: {proxy_info}] -> {response.status_code}")
                 return response.text
 
         except Exception as e:
             logger.error(f"[API请求] httpx请求失败 [代理: {proxy_info}]: {e}")
-            # 请求失败时报告代理失败
-            await self.report_proxy_result(success=False)
+            
+            # 如果使用代理失败，尝试直连重试
+            if self._current_proxy_info and not self._using_direct:
+                logger.warning(f"[API请求] 代理 {proxy_info} 失败，切换直连重试...")
+                await self.report_proxy_result(success=False)
+                
+                try:
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        response = await client.post(url_with_params, headers=headers, content="")
+                        logger.debug(f"[API请求] {url_with_params} [直连重试] -> {response.status_code}")
+                        return response.text
+                except Exception as e2:
+                    logger.error(f"[API请求] 直连重试失败: {e2}")
+                    return None
+            
             return None
 
     async def _fetch_with_browser(self, api_url: str, params: Dict) -> Optional[str]:
-        """使用浏览器发起POST请求（使用浏览器Cookie）"""
+        """使用浏览器发起POST请求（使用浏览器Cookie），代理失败自动切换直连重试"""
         proxy_info = self.get_proxy_display()
         try:
             response = await self.page.evaluate('''async (args) => {
@@ -699,8 +721,43 @@ class DetailCrawler(BaseCrawler):
             return response
         except Exception as e:
             logger.error(f"[API请求] 浏览器请求失败 [代理: {proxy_info}]: {e}")
-            # 请求失败时报告代理失败
-            await self.report_proxy_result(success=False)
+            
+            # 如果使用代理失败，尝试切换直连重试
+            if self._current_proxy_info and not self._using_direct:
+                logger.warning(f"[API请求] 代理 {proxy_info} 失败，切换直连重试...")
+                await self.report_proxy_result(success=False)
+                
+                # 关闭当前浏览器，用直连重新初始化
+                await self.close()
+                await self.init_browser(use_proxy=False)
+                
+                # 直连重试
+                try:
+                    response = await self.page.evaluate('''async (args) => {
+                        const url = new URL(args.url);
+                        Object.keys(args.params).forEach(key =>
+                            url.searchParams.append(key, args.params[key])
+                        );
+
+                        const response = await fetch(url.toString(), {
+                            method: 'POST',
+                            credentials: 'include',
+                            headers: {
+                                'Accept': 'application/json, text/javascript, */*; q=0.01',
+                                'X-Requested-With': 'XMLHttpRequest',
+                                'Content-Length': '0'
+                            },
+                            body: ''
+                        });
+                        const text = await response.text();
+                        return text;
+                    }''', {"url": api_url, "params": params})
+                    logger.debug(f"[API请求] 浏览器直连重试成功")
+                    return response
+                except Exception as e2:
+                    logger.error(f"[API请求] 浏览器直连重试失败: {e2}")
+                    return None
+            
             return None
 
     def _parse_comment_from_api(self, journal_id:str,item: Dict) -> Optional[Dict]:
