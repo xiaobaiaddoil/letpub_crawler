@@ -643,3 +643,5 @@ class ProxyService:
                     logger.info(f"[代理] 私密代理已获取: {count} 个")
                 except Exception as e:
                     logger.error(f"[代理] 获取私密代理失败: {e}")
+        
+        return result
