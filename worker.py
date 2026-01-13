@@ -222,60 +222,70 @@ class DistributedWorker:
         task = tasks[0]
         await self.update_task_count(1)
 
+        crawler = None
         try:
-            async with CategoryCrawler() as crawler:
-                categories = await crawler.crawl()
+            crawler = CategoryCrawler()
+            await crawler.init_browser()
 
-                new_count = 0
-                updated_count = 0
+            categories = await crawler.crawl()
 
-                for cat_data in categories:
-                    field_tag = cat_data["field_tag"]
-                    new_total = cat_data.get("total_count", 0)
+            new_count = 0
+            updated_count = 0
 
-                    category = db.query(Category).filter(
-                        Category.field_tag == field_tag
-                    ).first()
+            for cat_data in categories:
+                field_tag = cat_data["field_tag"]
+                new_total = cat_data.get("total_count", 0)
 
-                    if not category:
-                        category = Category(
-                            field_tag=field_tag,
-                            name=cat_data["name"],
-                            total_count=new_total
-                        )
-                        db.add(category)
-                        db.commit()
-                        new_count += 1
+                category = db.query(Category).filter(
+                    Category.field_tag == field_tag
+                ).first()
 
-                        if new_total > 0:
-                            total_pages = math.ceil(new_total / JOURNALS_PER_PAGE)
-                            task_manager.create_list_tasks(field_tag, total_pages)
-                            logger.info(f"新分类 {cat_data['name']}: {new_total} 期刊, {total_pages} 页")
+                if not category:
+                    category = Category(
+                        field_tag=field_tag,
+                        name=cat_data["name"],
+                        total_count=new_total
+                    )
+                    db.add(category)
+                    db.commit()
+                    new_count += 1
 
-                    elif category.total_count != new_total:
-                        old_total = category.total_count
-                        category.name = cat_data["name"]
-                        category.total_count = new_total
-                        db.commit()
-                        updated_count += 1
+                    if new_total > 0:
+                        total_pages = math.ceil(new_total / JOURNALS_PER_PAGE)
+                        task_manager.create_list_tasks(field_tag, total_pages)
+                        logger.info(f"新分类 {cat_data['name']}: {new_total} 期刊, {total_pages} 页")
 
-                        old_pages = math.ceil(old_total / JOURNALS_PER_PAGE) if old_total > 0 else 0
-                        new_pages = math.ceil(new_total / JOURNALS_PER_PAGE) if new_total > 0 else 0
+                elif category.total_count != new_total:
+                    old_total = category.total_count
+                    category.name = cat_data["name"]
+                    category.total_count = new_total
+                    db.commit()
+                    updated_count += 1
 
-                        if new_pages > old_pages:
-                            task_manager.create_list_tasks(field_tag, new_pages)
-                            logger.info(f"分类更新 {cat_data['name']}: {old_total}->{new_total}")
+                    old_pages = math.ceil(old_total / JOURNALS_PER_PAGE) if old_total > 0 else 0
+                    new_pages = math.ceil(new_total / JOURNALS_PER_PAGE) if new_total > 0 else 0
 
-                logger.info(f"分类任务完成: 新增 {new_count}, 更新 {updated_count}")
-                task_manager.complete_task(task)
-                await self.increment_stats(completed=1)
+                    if new_pages > old_pages:
+                        task_manager.create_list_tasks(field_tag, new_pages)
+                        logger.info(f"分类更新 {cat_data['name']}: {old_total}->{new_total}")
+
+            logger.info(f"分类任务完成: 新增 {new_count}, 更新 {updated_count}")
+            task_manager.complete_task(task)
+            # 报告 Cookie 使用成功
+            await crawler.report_cookie_result(success=True)
+            await self.increment_stats(completed=1)
 
         except Exception as e:
             db.rollback()
             logger.exception("处理分类任务失败")
             task_manager.fail_task(task, str(e))
+            # 报告 Cookie 使用失败
+            if crawler:
+                await crawler.report_cookie_result(success=False)
             await self.increment_stats(failed=1)
         finally:
+            if crawler:
+                await crawler.close()
             await self.update_task_count(0)
 
     async def _process_list_tasks(self, db, task_manager: TaskManager):
@@ -292,20 +302,28 @@ class DistributedWorker:
         completed = 0
         failed = 0
 
-        for task in tasks:
-            if not self._running or self._paused:
-                break
+        # 浏览器实例移到循环外部，批量任务复用
+        crawler = None
+        try:
+            crawler = ListCrawler()
+            await crawler.init_browser()
 
-            try:
-                extra = json.loads(task.extra_data) if task.extra_data else {}
-                field_tag = extra.get("field_tag")
-                page = extra.get("page", 1)
+            for task in tasks:
+                if not self._running or self._paused:
+                    break
 
-                category = db.query(Category).filter(
-                    Category.field_tag == field_tag
-                ).first()
+                try:
+                    extra = json.loads(task.extra_data) if task.extra_data else {}
+                    field_tag = extra.get("field_tag")
+                    page = extra.get("page", 1)
 
-                async with ListCrawler() as crawler:
+                    category = db.query(Category).filter(
+                        Category.field_tag == field_tag
+                    ).first()
+
+                    # 确保浏览器可用
+                    await crawler.ensure_browser()
+
                     journals = await crawler.crawl(field_tag, page)
 
                     for j_data in journals:
@@ -328,14 +346,23 @@ class DistributedWorker:
                                 category.id if category else None
                             )
 
-                task_manager.complete_task(task)
-                completed += 1
+                    task_manager.complete_task(task)
+                    # 报告 Cookie 使用成功
+                    await crawler.report_cookie_result(success=True)
+                    completed += 1
 
-            except Exception as e:
-                db.rollback()
-                logger.exception(f"处理列表任务失败: {task.target_id}")
-                task_manager.fail_task(task, str(e))
-                failed += 1
+                except Exception as e:
+                    db.rollback()
+                    logger.exception(f"处理列表任务失败: {task.target_id}")
+                    task_manager.fail_task(task, str(e))
+                    # 报告 Cookie 使用失败
+                    if crawler:
+                        await crawler.report_cookie_result(success=False)
+                    failed += 1
+
+        finally:
+            if crawler:
+                await crawler.close()
 
         await self.increment_stats(completed=completed, failed=failed)
         await self.update_task_count(0)
@@ -354,14 +381,22 @@ class DistributedWorker:
         completed = 0
         failed = 0
 
-        for task in tasks:
-            if not self._running or self._paused:
-                break
+        # 浏览器实例移到循环外部，批量任务复用
+        crawler = None
+        try:
+            crawler = DetailCrawler()
+            await crawler.init_browser()
 
-            try:
-                journal_id = int(task.target_id)
+            for task in tasks:
+                if not self._running or self._paused:
+                    break
 
-                async with DetailCrawler() as crawler:
+                try:
+                    journal_id = int(task.target_id)
+
+                    # 确保浏览器可用
+                    await crawler.ensure_browser()
+
                     detail = await crawler.crawl(journal_id)
 
                     journal = db.query(Journal).filter(
@@ -413,14 +448,23 @@ class DistributedWorker:
                         journal.comments_crawled = True
                         db.commit()
 
-                task_manager.complete_task(task)
-                completed += 1
+                    task_manager.complete_task(task)
+                    # 报告 Cookie 使用成功
+                    await crawler.report_cookie_result(success=True)
+                    completed += 1
 
-            except Exception as e:
-                db.rollback()
-                logger.exception(f"处理详情任务失败: {task.target_id}")
-                task_manager.fail_task(task, str(e))
-                failed += 1
+                except Exception as e:
+                    db.rollback()
+                    logger.exception(f"处理详情任务失败: {task.target_id}")
+                    task_manager.fail_task(task, str(e))
+                    # 报告 Cookie 使用失败
+                    if crawler:
+                        await crawler.report_cookie_result(success=False)
+                    failed += 1
+
+        finally:
+            if crawler:
+                await crawler.close()
 
         await self.increment_stats(completed=completed, failed=failed)
         await self.update_task_count(0)
