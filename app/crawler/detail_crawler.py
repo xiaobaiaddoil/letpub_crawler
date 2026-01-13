@@ -109,6 +109,15 @@ class DetailCrawler(BaseCrawler):
             logger.warning(f"期刊 {journal_id} 数据可能不完整，仅提取到 {extracted_fields} 个字段")
         else:
             logger.info(f"期刊 {journal_id} 数据校验通过，共 {extracted_fields} 个字段")
+        # 检查字段数量是否达到最小期望
+        if extracted_fields < self.MIN_EXPECTED_FIELDS:
+            # 检查重要字段
+            missing_important = [
+                field for field in self.IMPORTANT_FIELDS
+                if field not in info and field.lower() not in [k.lower() for k in info.keys()]
+            ]
+
+            raise DataValidationError(
                 f"期刊 {journal_id} 数据不完整，仅提取到 {extracted_fields} 个字段（期望至少 {self.MIN_EXPECTED_FIELDS} 个）",
                 missing_fields=missing_important,
                 extracted_fields=extracted_fields
