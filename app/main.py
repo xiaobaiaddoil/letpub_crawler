@@ -60,25 +60,26 @@ async def proxy_auto_refresh_loop():
     from app.services.proxy_service import ProxyService
     
     # 获取刷新间隔配置
-    proxy_cfg = config.proxy_config
-    auto_refresh_cfg = proxy_cfg.get("auto_refresh", {})
+    proxy_cfg = config.proxy_config or {}
+    auto_refresh_cfg = proxy_cfg.get("auto_refresh", {}) or {}
     refresh_enabled = auto_refresh_cfg.get("enabled", False)
     refresh_interval = auto_refresh_cfg.get("interval", 300)  # 默认5分钟
     
     if not refresh_enabled:
         logger.info("[代理] 自动刷新未启用")
         # 仅首次初始化，不循环刷新
-        try:
-            db = SessionLocal()
+        if proxy_cfg:
             try:
-                service = ProxyService(db)
-                result = await service.fetch_proxies_from_config()
-                if result["tunnel"] > 0 or result["private"] > 0:
-                    logger.info(f"[代理] 初始化完成: 隧道 {result['tunnel']} 个, 私密 {result['private']} 个")
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error(f"[代理] 初始化失败: {e}")
+                db = SessionLocal()
+                try:
+                    service = ProxyService(db)
+                    result = await service.fetch_proxies_from_config()
+                    if result["tunnel"] > 0 or result["private"] > 0:
+                        logger.info(f"[代理] 初始化完成: 隧道 {result['tunnel']} 个, 私密 {result['private']} 个")
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.error(f"[代理] 初始化失败: {e}")
         return
     
     logger.info(f"[代理] 自动刷新已启用，间隔 {refresh_interval} 秒")
@@ -103,7 +104,6 @@ async def proxy_auto_refresh_loop():
             
             # 重新读取配置（支持热更新）
             config.reload()
-            proxy_cfg = config.proxy_config
             
             db = SessionLocal()
             try:

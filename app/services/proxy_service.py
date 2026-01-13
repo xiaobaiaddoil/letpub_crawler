@@ -606,11 +606,11 @@ class ProxyService:
         proxy_cfg = config.proxy_config
         
         if not proxy_cfg:
-            logger.warning("[代理] proxy.yaml 配置为空")
+            logger.debug("[代理] proxy.yaml 配置为空")
             return result
         
         # 获取隧道代理
-        tunnel_cfg = proxy_cfg.get("tunnel", {})
+        tunnel_cfg = proxy_cfg.get("tunnel") or {}
         if tunnel_cfg.get("enabled"):
             addr = tunnel_cfg.get("addr")
             username = tunnel_cfg.get("username")
@@ -625,7 +625,7 @@ class ProxyService:
                     logger.error(f"[代理] 添加隧道代理失败: {e}")
         
         # 获取私密代理
-        private_cfg = proxy_cfg.get("private", {})
+        private_cfg = proxy_cfg.get("private") or {}
         if private_cfg.get("enabled"):
             api_url = private_cfg.get("api_url")
             username = private_cfg.get("username")
