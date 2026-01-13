@@ -1,0 +1,44 @@
+# ==========================================
+# 应用主配置文件示例
+# 复制此文件为 app.yaml 并填入实际配置
+# ==========================================
+
+# 应用配置
+app:
+  debug: false
+  console_log_level: WARNING # DEBUG/INFO/WARNING/ERROR
+  host: 0.0.0.0
+  port: 8000
+
+# 运行模式
+# master: 主服务器模式 - 只提供管理界面和API，不运行爬虫
+# worker: Worker模式 - 请使用 worker.py 脚本运行
+# standalone: 单机模式 - 管理界面 + 本地爬虫（默认）
+run_mode: standalone
+crawler_auto_start: true
+
+# 数据库配置
+database:
+  host: localhost
+  port: 5432
+  name: letpub_crawler
+  user: postgres
+  password: "your_password"
+
+# 爬虫配置
+crawler:
+  delay_min: 3 # 请求最小延迟（秒）
+  delay_max: 8 # 请求最大延迟（秒）
+  max_retry: 3 # 任务最大重试次数
+  batch_size: 5 # 每次获取任务数量
+
+# 分布式配置
+distributed:
+  worker_id: "" # Worker标识，为空则自动生成
+  task_lock_timeout: 600 # 任务锁定超时时间（秒）
+  heartbeat_interval: 30 # 心跳间隔（秒）
+  worker_timeout: 120 # Worker超时时间（秒）
+  master_url: "" # Master服务器URL
+
+# 加密密钥（用于加密敏感信息，可用 Fernet.generate_key() 生成）
+encryption_key: ""

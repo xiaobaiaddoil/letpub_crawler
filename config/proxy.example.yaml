@@ -1,0 +1,24 @@
+# ==========================================
+# 代理配置文件示例
+# 复制此文件为 proxy.yaml 并填入实际配置
+# ==========================================
+
+# 隧道代理配置（固定地址，IP自动切换）
+tunnel:
+  enabled: false
+  addr: "m684.kdltps.com:15818"
+  username: "your_tunnel_username"
+  password: "your_tunnel_password"
+
+# 私密代理配置（API获取动态IP）
+private:
+  enabled: false
+  api_url: "https://dps.kdlapi.com/api/getdps/?secret_id=xxx&signature=xxx&num=10"
+  username: "your_private_username"
+  password: "your_private_password"
+  fetch_num: 10
+
+# 自动刷新配置（私密代理IP会过期，需要定期刷新）
+auto_refresh:
+  enabled: false
+  interval: 300 # 刷新间隔（秒）

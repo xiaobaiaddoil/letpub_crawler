@@ -598,16 +598,18 @@ class DetailCrawler(BaseCrawler):
                         break
 
                     # 解析每条评论  每条评论是一个div字符串需要处理
+                    page_comments = []
                     for item in comment_data:
                         try:
                             comment = self._parse_comment_from_api(journal_id, item)
                             if comment:
+                                page_comments.append(comment)
                                 comments.append(comment)
                         except Exception as e:
                             logger.warning(f"解析API评论数据失败: {e}")
                             continue
 
-                    logger.info(f"第 {page} 页获取 {len(comment_data)} 条评论")
+                    logger.info(f"第 {page} 页: API返回 {len(comment_data)} 条, 有效 {len(page_comments)} 条")
 
                     # 检查是否还有更多评论
                     total_count = data.get("count", 0)
@@ -636,10 +638,10 @@ class DetailCrawler(BaseCrawler):
         return comments
 
     async def _fetch_with_httpx(self, api_url: str, params: Dict, cookie_value: str) -> Optional[str]:
-        """使用httpx发起请求（带自定义Cookie）"""
+        """使用httpx发起POST请求（带自定义Cookie）"""
+        proxy_info = self.get_proxy_display()
         try:
             # 构建Cookie字符串
-            # cookie_value 格式可能是 "PHPSESSID=xxx" 或纯值 "xxx"
             if "=" in cookie_value:
                 cookie_header = cookie_value
             else:
@@ -649,20 +651,30 @@ class DetailCrawler(BaseCrawler):
                 "Accept": "application/json, text/javascript, */*; q=0.01",
                 "X-Requested-With": "XMLHttpRequest",
                 "Cookie": cookie_header,
-                "Referer": config.BASE_URL,
-                "User-Agent": config.USER_AGENTS[0]
+                "Origin": "https://www.letpub.com.cn",
+                "Referer": f"{config.BASE_URL}/index.php?journalid={params.get('journalid')}&page=journalapp&view=detail",
+                "User-Agent": config.USER_AGENTS[0],
+                "Content-Length": "0"
             }
 
+            # 构建完整URL（参数放在URL中）
+            url_with_params = f"{api_url}?action={params['action']}&journalid={params['journalid']}&sorttype={params['sorttype']}&page={params['page']}"
+
             async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(api_url, params=params, headers=headers)
+                # 使用 POST 请求，body 为空
+                response = await client.post(url_with_params, headers=headers, content="")
+                logger.debug(f"[API请求] {url_with_params} [代理: {proxy_info}] -> {response.status_code}")
                 return response.text
 
         except Exception as e:
-            logger.error(f"httpx请求失败: {e}")
+            logger.error(f"[API请求] httpx请求失败 [代理: {proxy_info}]: {e}")
+            # 请求失败时报告代理失败
+            await self.report_proxy_result(success=False)
             return None
 
     async def _fetch_with_browser(self, api_url: str, params: Dict) -> Optional[str]:
-        """使用浏览器发起请求（使用浏览器Cookie）"""
+        """使用浏览器发起POST请求（使用浏览器Cookie）"""
+        proxy_info = self.get_proxy_display()
         try:
             response = await self.page.evaluate('''async (args) => {
                 const url = new URL(args.url);
@@ -671,18 +683,24 @@ class DetailCrawler(BaseCrawler):
                 );
 
                 const response = await fetch(url.toString(), {
+                    method: 'POST',
                     credentials: 'include',
                     headers: {
                         'Accept': 'application/json, text/javascript, */*; q=0.01',
-                        'X-Requested-With': 'XMLHttpRequest'
-                    }
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'Content-Length': '0'
+                    },
+                    body: ''
                 });
                 const text = await response.text();
                 return text;
             }''', {"url": api_url, "params": params})
+            logger.debug(f"[API请求] 浏览器请求成功 [代理: {proxy_info}]")
             return response
         except Exception as e:
-            logger.error(f"浏览器请求失败: {e}")
+            logger.error(f"[API请求] 浏览器请求失败 [代理: {proxy_info}]: {e}")
+            # 请求失败时报告代理失败
+            await self.report_proxy_result(success=False)
             return None
 
     def _parse_comment_from_api(self, journal_id:str,item: Dict) -> Optional[Dict]:
@@ -780,10 +798,7 @@ class DetailCrawler(BaseCrawler):
                     exp_text = exp_text.split('其他用户回复：')[0].strip()
                 experience = exp_text
 
-            # 如果没有投稿经验，返回None
-            if not experience or len(experience) < 10:
-                return None
-
+            # 构建评论对象（即使没有投稿经验也保留）
             comment = {
                 "floor": floor,
                 "author": author or "匿名",
@@ -793,9 +808,14 @@ class DetailCrawler(BaseCrawler):
                 "submission_period": submission_period,
                 "publish_time": publish_time,  # datetime 对象
                 "update_time": update_time,    # datetime 对象
-                "content": experience,
+                "content": experience or "",
                 "comment_time": publish_time or update_time,  # 优先使用 publish_time
             }
+
+            # 如果没有任何有效内容，跳过
+            if not experience and not submission_result and not rating:
+                logger.debug(f"评论 {floor} 无有效内容，跳过")
+                return None
 
 
             author_name = comment.get("author", "anonymous")

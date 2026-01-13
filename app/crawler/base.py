@@ -20,17 +20,97 @@ class BaseCrawler(ABC):
         self._playwright = None
         # Cookie 池相关
         self._current_cookie_info: Optional[Dict] = None  # 当前使用的 Cookie 信息
+        # 代理相关
+        self._current_proxy_info: Optional[Dict] = None  # 当前使用的代理信息
 
-    async def init_browser(self):
-        """初始化浏览器"""
+    async def _get_proxy_from_pool(self) -> Optional[Dict]:
+        """从 Master 服务器的代理池获取代理"""
+        if not config.MASTER_URL:
+            logger.debug("[代理] 未配置 MASTER_URL，跳过代理池")
+            return None
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(f"{config.MASTER_URL}/api/proxies/random")
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get("id"):
+                        self._current_proxy_info = data
+                        proxy_type = data.get("proxy_type", "unknown")
+                        logger.info(f"[代理] 从代理池获取: {data.get('ip')}:{data.get('port')} (类型: {proxy_type})")
+                        return data
+                    else:
+                        # 返回空对象说明代理池为空
+                        logger.warning("[代理] 代理池为空，请检查代理配置或手动添加代理")
+                else:
+                    logger.warning(f"[代理] 获取代理失败: HTTP {response.status_code}")
+        except Exception as e:
+            logger.warning(f"[代理] 从代理池获取代理失败: {e}")
+
+        return None
+
+    async def report_proxy_result(self, success: bool):
+        """向 Master 服务器报告代理使用结果"""
+        if not config.MASTER_URL or not self._current_proxy_info:
+            return
+
+        proxy_id = self._current_proxy_info.get("id")
+        proxy_addr = self.get_proxy_display()
+        if not proxy_id:
+            return
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(
+                    f"{config.MASTER_URL}/api/proxies/{proxy_id}/report",
+                    params={"success": str(success).lower()}
+                )
+                if success:
+                    logger.debug(f"[代理] 报告成功: {proxy_addr}")
+                else:
+                    logger.warning(f"[代理] 报告失败: {proxy_addr}")
+        except Exception as e:
+            logger.warning(f"[代理] 报告结果失败: {e}")
+
+    async def init_browser(self, use_proxy: bool = True):
+        """初始化浏览器
+        
+        Args:
+            use_proxy: 是否使用代理，默认为 True
+        """
         self._playwright = await async_playwright().start()
+        
+        # 浏览器启动参数
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+        ]
+        
+        # 获取代理
+        proxy_config = None
+        if use_proxy:
+            proxy_info = await self._get_proxy_from_pool()
+            if proxy_info:
+                server = f"{proxy_info.get('protocol', 'http')}://{proxy_info['ip']}:{proxy_info['port']}"
+                proxy_config = {"server": server}
+                
+                # 如果有用户名密码（隧道代理），添加认证
+                if proxy_info.get("username") and proxy_info.get("password"):
+                    proxy_config["username"] = proxy_info["username"]
+                    proxy_config["password"] = proxy_info["password"]
+                    logger.info(f"[代理] 使用隧道代理: {proxy_info['ip']}:{proxy_info['port']} (带认证)")
+                else:
+                    logger.info(f"[代理] 使用私密代理: {proxy_info['ip']}:{proxy_info['port']}")
+            else:
+                logger.info("[代理] 未获取到代理，使用直连")
+        else:
+            logger.info("[代理] 已禁用代理，使用直连")
+        
         self.browser = await self._playwright.chromium.launch(
             headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ]
+            args=launch_args,
+            proxy=proxy_config
         )
         await self._create_context()
 
@@ -124,6 +204,16 @@ class BaseCrawler(ABC):
             return self._current_cookie_info.get("cookie_value")
         return config.LETPUB_COOKIE or None
 
+    def get_current_proxy_info(self) -> Optional[Dict]:
+        """获取当前使用的代理信息"""
+        return self._current_proxy_info
+
+    def get_proxy_display(self) -> str:
+        """获取代理显示字符串（用于日志）"""
+        if self._current_proxy_info:
+            return f"{self._current_proxy_info.get('ip')}:{self._current_proxy_info.get('port')}"
+        return "直连"
+
     async def random_delay(self):
         """随机延迟"""
         delay = random.uniform(config.CRAWL_DELAY_MIN, config.CRAWL_DELAY_MAX)
@@ -132,13 +222,16 @@ class BaseCrawler(ABC):
 
     async def goto(self, url: str, wait_until: str = "networkidle") -> bool:
         """访问页面"""
+        proxy_info = self.get_proxy_display()
         try:
-            logger.info(f"访问: {url}")
+            logger.info(f"访问: {url} [代理: {proxy_info}]")
             await self.page.goto(url, wait_until=wait_until, timeout=60000)
             await self.random_delay()
             return True
         except Exception as e:
-            logger.error(f"访问页面失败: {url}, 错误: {e}")
+            logger.error(f"访问页面失败: {url} [代理: {proxy_info}], 错误: {e}")
+            # 请求失败时自动报告代理失败
+            await self.report_proxy_result(success=False)
             return False
 
     async def scroll_to_load(self, scroll_times: int = 3, delay: float = 1.5):

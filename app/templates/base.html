@@ -1,258 +1,320 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{% block title %}LetPub爬虫系统{% endblock %}</title>
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: #f5f5f5;
-            color: #333;
-            line-height: 1.6;
-        }
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 20px 0;
-            margin-bottom: 20px;
-        }
-        header .container {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        header h1 {
-            font-size: 24px;
-        }
-        nav a {
-            color: white;
-            text-decoration: none;
-            margin-left: 20px;
-            padding: 8px 16px;
-            border-radius: 4px;
-            transition: background 0.3s;
-        }
-        nav a:hover, nav a.active {
-            background: rgba(255,255,255,0.2);
-        }
-        .card {
-            background: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            padding: 20px;
-            margin-bottom: 20px;
-        }
-        .card h2 {
-            font-size: 18px;
-            margin-bottom: 15px;
-            color: #555;
-            border-bottom: 1px solid #eee;
-            padding-bottom: 10px;
-        }
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-        }
-        .stat-item {
-            text-align: center;
-            padding: 20px;
-            background: #f8f9fa;
-            border-radius: 8px;
-        }
-        .stat-value {
-            font-size: 36px;
-            font-weight: bold;
-            color: #667eea;
-        }
-        .stat-label {
-            color: #666;
-            margin-top: 5px;
-        }
-        .btn {
-            display: inline-block;
-            padding: 10px 20px;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 14px;
-            text-decoration: none;
-            transition: all 0.3s;
-        }
-        .btn-primary {
-            background: #667eea;
-            color: white;
-        }
-        .btn-primary:hover {
-            background: #5a6fd6;
-        }
-        .btn-warning {
-            background: #ffc107;
-            color: #333;
-        }
-        .btn-success {
-            background: #28a745;
-            color: white;
-        }
-        .btn-danger {
-            background: #dc3545;
-            color: white;
-        }
-        .btn-sm {
-            padding: 5px 10px;
-            font-size: 12px;
-        }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        th, td {
-            padding: 12px;
-            text-align: left;
-            border-bottom: 1px solid #eee;
-        }
-        th {
-            background: #f8f9fa;
-            font-weight: 600;
-        }
-        tr:hover {
-            background: #f8f9fa;
-        }
-        .status {
-            display: inline-block;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 12px;
-            font-weight: 500;
-        }
-        .status-pending { background: #e9ecef; color: #495057; }
-        .status-running { background: #cce5ff; color: #004085; }
-        .status-completed { background: #d4edda; color: #155724; }
-        .status-failed { background: #f8d7da; color: #721c24; }
-        .form-group {
-            margin-bottom: 15px;
-        }
-        .form-group label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: 500;
-        }
-        .form-group input, .form-group textarea, .form-group select {
-            width: 100%;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            font-size: 14px;
-        }
-        .form-group textarea {
-            min-height: 100px;
-            resize: vertical;
-        }
-        .alert {
-            padding: 15px;
-            border-radius: 4px;
-            margin-bottom: 15px;
-        }
-        .alert-success { background: #d4edda; color: #155724; }
-        .alert-danger { background: #f8d7da; color: #721c24; }
-        .alert-info { background: #cce5ff; color: #004085; }
-        .flex {
-            display: flex;
-            gap: 10px;
-            align-items: center;
-        }
-        .flex-between {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        .text-muted { color: #6c757d; }
-        .text-small { font-size: 12px; }
-        .text-success { color: #28a745; }
-        .text-danger { color: #dc3545; }
-        .text-center { text-align: center; }
-        .mt-2 { margin-top: 10px; }
-        .mb-2 { margin-bottom: 10px; }
-        .btn-small {
-            padding: 5px 10px;
-            font-size: 12px;
-        }
-        code {
-            background: #f4f4f4;
-            padding: 2px 6px;
-            border-radius: 3px;
-            font-family: 'Consolas', 'Monaco', monospace;
-            font-size: 12px;
-        }
-        pre {
-            background: #f4f4f4;
-            padding: 15px;
-            border-radius: 4px;
-            overflow-x: auto;
-            font-family: 'Consolas', 'Monaco', monospace;
-            font-size: 13px;
-        }
-        .pagination {
-            display: flex;
-            gap: 5px;
-            justify-content: center;
-            margin-top: 20px;
-        }
-        .pagination a {
-            padding: 8px 12px;
-            border: 1px solid #ddd;
-            text-decoration: none;
-            color: #333;
-            border-radius: 4px;
-        }
-        .pagination a:hover, .pagination a.active {
-            background: #667eea;
-            color: white;
-            border-color: #667eea;
-        }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+        background: #f5f5f5;
+        color: #333;
+        line-height: 1.6;
+      }
+      .container {
+        max-width: 1400px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 20px 0;
+        margin-bottom: 20px;
+      }
+      header .container {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      header h1 {
+        font-size: 24px;
+      }
+      nav a {
+        color: white;
+        text-decoration: none;
+        margin-left: 20px;
+        padding: 8px 16px;
+        border-radius: 4px;
+        transition: background 0.3s;
+      }
+      nav a:hover,
+      nav a.active {
+        background: rgba(255, 255, 255, 0.2);
+      }
+      .card {
+        background: white;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        padding: 20px;
+        margin-bottom: 20px;
+      }
+      .card h2 {
+        font-size: 18px;
+        margin-bottom: 15px;
+        color: #555;
+        border-bottom: 1px solid #eee;
+        padding-bottom: 10px;
+      }
+      .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 20px;
+      }
+      .stat-item {
+        text-align: center;
+        padding: 20px;
+        background: #f8f9fa;
+        border-radius: 8px;
+      }
+      .stat-value {
+        font-size: 36px;
+        font-weight: bold;
+        color: #667eea;
+      }
+      .stat-label {
+        color: #666;
+        margin-top: 5px;
+      }
+      .btn {
+        display: inline-block;
+        padding: 10px 20px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 14px;
+        text-decoration: none;
+        transition: all 0.3s;
+      }
+      .btn-primary {
+        background: #667eea;
+        color: white;
+      }
+      .btn-primary:hover {
+        background: #5a6fd6;
+      }
+      .btn-warning {
+        background: #ffc107;
+        color: #333;
+      }
+      .btn-success {
+        background: #28a745;
+        color: white;
+      }
+      .btn-danger {
+        background: #dc3545;
+        color: white;
+      }
+      .btn-sm {
+        padding: 5px 10px;
+        font-size: 12px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        padding: 12px;
+        text-align: left;
+        border-bottom: 1px solid #eee;
+      }
+      th {
+        background: #f8f9fa;
+        font-weight: 600;
+      }
+      tr:hover {
+        background: #f8f9fa;
+      }
+      .status {
+        display: inline-block;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 12px;
+        font-weight: 500;
+      }
+      .status-pending {
+        background: #e9ecef;
+        color: #495057;
+      }
+      .status-running {
+        background: #cce5ff;
+        color: #004085;
+      }
+      .status-completed {
+        background: #d4edda;
+        color: #155724;
+      }
+      .status-failed {
+        background: #f8d7da;
+        color: #721c24;
+      }
+      .form-group {
+        margin-bottom: 15px;
+      }
+      .form-group label {
+        display: block;
+        margin-bottom: 5px;
+        font-weight: 500;
+      }
+      .form-group input,
+      .form-group textarea,
+      .form-group select {
+        width: 100%;
+        padding: 10px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 14px;
+      }
+      .form-group textarea {
+        min-height: 100px;
+        resize: vertical;
+      }
+      .alert {
+        padding: 15px;
+        border-radius: 4px;
+        margin-bottom: 15px;
+      }
+      .alert-success {
+        background: #d4edda;
+        color: #155724;
+      }
+      .alert-danger {
+        background: #f8d7da;
+        color: #721c24;
+      }
+      .alert-info {
+        background: #cce5ff;
+        color: #004085;
+      }
+      .flex {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+      .flex-between {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .text-muted {
+        color: #6c757d;
+      }
+      .text-small {
+        font-size: 12px;
+      }
+      .text-success {
+        color: #28a745;
+      }
+      .text-danger {
+        color: #dc3545;
+      }
+      .text-center {
+        text-align: center;
+      }
+      .mt-2 {
+        margin-top: 10px;
+      }
+      .mb-2 {
+        margin-bottom: 10px;
+      }
+      .btn-small {
+        padding: 5px 10px;
+        font-size: 12px;
+      }
+      code {
+        background: #f4f4f4;
+        padding: 2px 6px;
+        border-radius: 3px;
+        font-family: "Consolas", "Monaco", monospace;
+        font-size: 12px;
+      }
+      pre {
+        background: #f4f4f4;
+        padding: 15px;
+        border-radius: 4px;
+        overflow-x: auto;
+        font-family: "Consolas", "Monaco", monospace;
+        font-size: 13px;
+      }
+      .pagination {
+        display: flex;
+        gap: 5px;
+        justify-content: center;
+        margin-top: 20px;
+      }
+      .pagination a {
+        padding: 8px 12px;
+        border: 1px solid #ddd;
+        text-decoration: none;
+        color: #333;
+        border-radius: 4px;
+      }
+      .pagination a:hover,
+      .pagination a.active {
+        background: #667eea;
+        color: white;
+        border-color: #667eea;
+      }
     </style>
-</head>
-<body>
+  </head>
+  <body>
     <header>
-        <div class="container">
-            <h1>LetPub期刊爬虫系统</h1>
-            <nav>
-                <a href="/" class="{% if request.url.path == '/' %}active{% endif %}">控制面板</a>
-                <a href="/tasks" class="{% if request.url.path == '/tasks' %}active{% endif %}">任务管理</a>
-                <a href="/journals" class="{% if request.url.path == '/journals' %}active{% endif %}">期刊数据</a>
-                <a href="/workers" class="{% if request.url.path == '/workers' %}active{% endif %}">Worker管理</a>
-                <a href="/cookies" class="{% if request.url.path == '/cookies' %}active{% endif %}">Cookie池</a>
-            </nav>
-        </div>
+      <div class="container">
+        <h1>LetPub期刊爬虫系统</h1>
+        <nav>
+          <a href="/" class="{% if request.url.path == '/' %}active{% endif %}"
+            >控制面板</a
+          >
+          <a
+            href="/tasks"
+            class="{% if request.url.path == '/tasks' %}active{% endif %}"
+            >任务管理</a
+          >
+          <a
+            href="/journals"
+            class="{% if request.url.path == '/journals' %}active{% endif %}"
+            >期刊数据</a
+          >
+          <a
+            href="/workers"
+            class="{% if request.url.path == '/workers' %}active{% endif %}"
+            >Worker管理</a
+          >
+          <a
+            href="/cookies"
+            class="{% if request.url.path == '/cookies' %}active{% endif %}"
+            >Cookie池</a
+          >
+          <a
+            href="/proxies"
+            class="{% if request.url.path == '/proxies' %}active{% endif %}"
+            >代理池</a
+          >
+        </nav>
+      </div>
     </header>
-    <main class="container">
-        {% block content %}{% endblock %}
-    </main>
+    <main class="container">{% block content %}{% endblock %}</main>
     <script>
-        // 通用的fetch封装
-        async function apiCall(url, method = 'POST') {
-            try {
-                const response = await fetch(url, { method });
-                const data = await response.json();
-                return data;
-            } catch (error) {
-                console.error('API调用失败:', error);
-                return null;
-            }
+      // 通用的fetch封装
+      async function apiCall(url, method = "POST") {
+        try {
+          const response = await fetch(url, { method });
+          const data = await response.json();
+          return data;
+        } catch (error) {
+          console.error("API调用失败:", error);
+          return null;
         }
+      }
     </script>
     {% block scripts %}{% endblock %}
-</body>
+  </body>
 </html>

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from app.config import config
 from app.database import init_db, get_db, SessionLocal
-from app.api import tasks, data, workers, cookies, accounts
+from app.api import tasks, data, workers, cookies, accounts, proxies
 from app.services.crawler_service import crawler_service
 from app.services.task_manager import TaskManager
 from app.logging_config import setup_app_logging, clean_old_logs
@@ -46,6 +46,7 @@ templates.env.filters["localtime"] = utc_to_local
 
 # 后台任务
 crawler_task = None
+proxy_refresh_task = None
 
 # 是否自动启动爬虫（调试时设为false）
 CRAWLER_AUTO_START = os.getenv("CRAWLER_AUTO_START", "true").lower() == "true"
@@ -54,10 +55,44 @@ CRAWLER_AUTO_START = os.getenv("CRAWLER_AUTO_START", "true").lower() == "true"
 RUN_MODE = config.RUN_MODE  # master / worker / standalone
 
 
+async def proxy_auto_refresh_loop():
+    """代理自动刷新后台任务"""
+    from app.services.proxy_service import ProxyService
+    
+    # 首次启动时从配置文件初始化代理
+    try:
+        db = SessionLocal()
+        try:
+            service = ProxyService(db)
+            result = await service.init_from_env()
+            if result["tunnel"] > 0 or result["private"] > 0:
+                logger.info(f"从配置文件初始化代理: 隧道 {result['tunnel']} 个, 私密 {result['private']} 个")
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"从配置文件初始化代理失败: {e}")
+    
+    while True:
+        try:
+            await asyncio.sleep(60)  # 每分钟检查一次
+            db = SessionLocal()
+            try:
+                service = ProxyService(db)
+                result = await service.auto_refresh_proxies()
+                if result["added_proxies"] > 0:
+                    logger.info(f"代理自动刷新: 刷新了 {result['refreshed_configs']} 个配置，添加 {result['added_proxies']} 个代理")
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"代理自动刷新失败: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    global crawler_task
+    global crawler_task, proxy_refresh_task
 
     # 启动时初始化数据库
     logger.info("初始化数据库...")
@@ -69,6 +104,10 @@ async def lifespan(app: FastAPI):
         logger.error(f"数据库初始化失败: {e}")
         logger.error("请检查 DATABASE_URL 配置和数据库连接")
         raise
+
+    # 启动代理自动刷新任务（所有模式都启动）
+    proxy_refresh_task = asyncio.create_task(proxy_auto_refresh_loop())
+    logger.info("代理自动刷新任务已启动")
 
     # 根据运行模式决定是否启动爬虫
     if RUN_MODE == "master":
@@ -107,6 +146,14 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # 关闭代理自动刷新任务
+    if proxy_refresh_task:
+        proxy_refresh_task.cancel()
+        try:
+            await proxy_refresh_task
+        except asyncio.CancelledError:
+            pass
+
     # 关闭时停止爬虫
     if RUN_MODE != "master":
         crawler_service.stop()
@@ -132,6 +179,7 @@ app.include_router(data.router)
 app.include_router(workers.router)
 app.include_router(cookies.router)
 app.include_router(accounts.router)
+app.include_router(proxies.router)
 
 # 爬虫控制API
 @app.post("/api/crawler/start")
@@ -342,6 +390,12 @@ async def cookies_page(request: Request, db: Session = Depends(get_db)):
         "active_count": active_count,
         "accounts": accounts_list
     })
+
+
+@app.get("/proxies", response_class=HTMLResponse)
+async def proxies_page(request: Request):
+    """代理池管理页面"""
+    return templates.TemplateResponse("proxies.html", {"request": request})
 
 if __name__ == "__main__":
     import uvicorn

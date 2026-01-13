@@ -326,8 +326,9 @@ class DistributedWorker:
 
             logger.info(f"分类任务完成: 新增 {new_count}, 更新 {updated_count}")
             task_manager.complete_task(task)
-            # 报告 Cookie 使用成功
+            # 报告 Cookie 和代理使用成功
             await crawler.report_cookie_result(success=True)
+            await crawler.report_proxy_result(success=True)
             await self.increment_stats(completed=1)
 
         except Exception as e:
@@ -339,9 +340,10 @@ class DistributedWorker:
             await self._save_failed_html(crawler, "category", error_msg)
             
             task_manager.fail_task(task, error_msg)
-            # 报告 Cookie 使用失败
+            # 报告 Cookie 和代理使用失败
             if crawler:
                 await crawler.report_cookie_result(success=False)
+                await crawler.report_proxy_result(success=False)
             await self.increment_stats(failed=1)
             
             # 检查是否需要休眠
@@ -414,8 +416,9 @@ class DistributedWorker:
                             )
 
                     task_manager.complete_task(task)
-                    # 报告 Cookie 使用成功
+                    # 报告 Cookie 和代理使用成功
                     await crawler.report_cookie_result(success=True)
+                    await crawler.report_proxy_result(success=True)
                     completed += 1
 
                 except Exception as e:
@@ -427,9 +430,10 @@ class DistributedWorker:
                     await self._save_failed_html(crawler, task.target_id, error_msg)
                     
                     task_manager.fail_task(task, error_msg)
-                    # 报告 Cookie 使用失败
+                    # 报告 Cookie 和代理使用失败
                     if crawler:
                         await crawler.report_cookie_result(success=False)
+                        await crawler.report_proxy_result(success=False)
                     failed += 1
                     
                     # 检查是否需要休眠
@@ -504,37 +508,40 @@ class DistributedWorker:
                         journal.detail_crawled = True
                         db.commit()  # 先提交期刊信息
 
-                        # 单独处理评论，先去重避免同批次重复
+                        # 批量处理评论，使用 ON CONFLICT DO NOTHING
                         seen_comment_ids = set()
+                        comments_to_insert = []
+                        
                         for c_data in detail.get("comments", []):
                             comment_id = c_data.get("comment_id")
                             if not comment_id or comment_id in seen_comment_ids:
                                 continue
                             seen_comment_ids.add(comment_id)
-
-                            try:
-                                # 使用 merge 避免重复插入问题
-                                from sqlalchemy.dialects.postgresql import insert
-                                stmt = insert(Comment).values(
-                                    journal_id=journal.journal_id,
-                                    comment_id=comment_id,
-                                    content=c_data.get("content"),
-                                    author=c_data.get("author"),
-                                    rating=c_data.get("rating"),
-                                    submit_experience=c_data.get("submit_experience"),
-                                    comment_time=c_data.get("comment_time")
-                                ).on_conflict_do_nothing(index_elements=['comment_id'])
-                                db.execute(stmt)
-                                db.commit()
-                            except Exception:
-                                db.rollback()
+                            comments_to_insert.append({
+                                "journal_id": journal.journal_id,
+                                "comment_id": comment_id,
+                                "content": c_data.get("content"),
+                                "author": c_data.get("author"),
+                                "rating": c_data.get("rating"),
+                                "submit_experience": c_data.get("submit_experience"),
+                                "comment_time": c_data.get("comment_time")
+                            })
+                        
+                        # 批量插入，忽略冲突
+                        if comments_to_insert:
+                            from sqlalchemy.dialects.postgresql import insert
+                            stmt = insert(Comment).values(comments_to_insert)
+                            stmt = stmt.on_conflict_do_nothing(index_elements=['comment_id'])
+                            db.execute(stmt)
+                            db.commit()
 
                         journal.comments_crawled = True
                         db.commit()
 
                     task_manager.complete_task(task)
-                    # 报告 Cookie 使用成功
+                    # 报告 Cookie 和代理使用成功
                     await crawler.report_cookie_result(success=True)
+                    await crawler.report_proxy_result(success=True)
                     completed += 1
 
                 except Exception as e:
@@ -546,9 +553,10 @@ class DistributedWorker:
                     await self._save_failed_html(crawler, task.target_id, error_msg)
                     
                     task_manager.fail_task(task, error_msg)
-                    # 报告 Cookie 使用失败
+                    # 报告 Cookie 和代理使用失败
                     if crawler:
                         await crawler.report_cookie_result(success=False)
+                        await crawler.report_proxy_result(success=False)
                     failed += 1
                     
                     # 检查是否需要休眠

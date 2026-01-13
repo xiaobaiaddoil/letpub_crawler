@@ -265,27 +265,30 @@ class CrawlerService:
                         journal.detail_data = basic_info
                         journal.detail_crawled = True
 
-                        # 保存评论
+                        # 批量处理评论，使用 ON CONFLICT DO NOTHING
+                        seen_comment_ids = set()
+                        comments_to_insert = []
+                        
                         for c_data in detail.get("comments", []):
                             comment_id = c_data.get("comment_id")
-                            if not comment_id:
+                            if not comment_id or comment_id in seen_comment_ids:
                                 continue
-
-                            existing = db.query(Comment).filter(
-                                Comment.comment_id == comment_id
-                            ).first()
-
-                            if not existing:
-                                comment = Comment(
-                                    journal_id=journal.journal_id,
-                                    comment_id=comment_id,
-                                    content=c_data.get("content"),
-                                    author=c_data.get("author"),
-                                    rating=c_data.get("rating"),
-                                    submit_experience=c_data.get("submit_experience"),
-                                    comment_time=c_data.get("comment_time")  # 使用 comment_time 字段（已转换为 datetime）
-                                )
-                                db.add(comment)
+                            seen_comment_ids.add(comment_id)
+                            comments_to_insert.append({
+                                "journal_id": journal.journal_id,
+                                "comment_id": comment_id,
+                                "content": c_data.get("content"),
+                                "author": c_data.get("author"),
+                                "rating": c_data.get("rating"),
+                                "submit_experience": c_data.get("submit_experience"),
+                                "comment_time": c_data.get("comment_time")
+                            })
+                        
+                        if comments_to_insert:
+                            from sqlalchemy.dialects.postgresql import insert
+                            stmt = insert(Comment).values(comments_to_insert)
+                            stmt = stmt.on_conflict_do_nothing(index_elements=['comment_id'])
+                            db.execute(stmt)
 
                         journal.comments_crawled = True
                         db.commit()

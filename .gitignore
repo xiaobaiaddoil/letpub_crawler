@@ -40,6 +40,10 @@ env/
 .env
 .env.local
 
+# Config files (keep examples)
+config/app.yaml
+config/proxy.yaml
+
 # Logs
 *.log
 logs/

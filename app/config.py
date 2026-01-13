@@ -1,51 +1,123 @@
 import os
 from pathlib import Path
-from dotenv import load_dotenv
+from typing import Any
+import yaml
 
-# 加载.env文件
-env_path = Path(__file__).parent.parent / ".env"
-if env_path.exists():
-    load_dotenv(env_path)
+CONFIG_DIR = Path(__file__).parent.parent / "config"
+
+
+def load_yaml_config(filename: str) -> dict:
+    """加载 YAML 配置文件"""
+    config_path = CONFIG_DIR / filename
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    return {}
+
+
+def get_nested(data: dict, *keys, default: Any = None) -> Any:
+    """获取嵌套字典的值"""
+    for key in keys:
+        if isinstance(data, dict):
+            data = data.get(key, default)
+        else:
+            return default
+    return data if data is not None else default
+
 
 class Config:
-    # 应用配置
-    DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"
-    CONSOLE_LOG_LEVEL: str = os.getenv("CONSOLE_LOG_LEVEL", "WARNING").upper()
+    def __init__(self):
+        self._app_config = load_yaml_config("app.yaml")
+        self._proxy_config = load_yaml_config("proxy.yaml")
+    
+    @property
+    def DEBUG(self) -> bool:
+        return get_nested(self._app_config, "app", "debug", default=False)
+    
+    @property
+    def CONSOLE_LOG_LEVEL(self) -> str:
+        return str(get_nested(self._app_config, "app", "console_log_level", default="WARNING")).upper()
+    
+    @property
+    def HOST(self) -> str:
+        return str(get_nested(self._app_config, "app", "host", default="0.0.0.0"))
+    
+    @property
+    def PORT(self) -> int:
+        return int(get_nested(self._app_config, "app", "port", default=8000))
+    
+    @property
+    def RUN_MODE(self) -> str:
+        return str(get_nested(self._app_config, "run_mode", default="standalone")).lower()
+    
+    @property
+    def CRAWLER_AUTO_START(self) -> bool:
+        return get_nested(self._app_config, "crawler_auto_start", default=True)
 
-    # 运行模式: master(主服务器-管理界面) / worker(从服务器-爬虫) / standalone(单机模式)
-    RUN_MODE: str = os.getenv("RUN_MODE", "standalone").lower()
-
-    # 数据库配置
-    DATABASE_URL: str = os.getenv(
-        "DATABASE_URL",
-        "postgresql://myuser:123456@192.168.0.110:5432/letpub_crawler"
-    )
-
-    # 爬虫配置
-    CRAWL_DELAY_MIN: int = int(os.getenv("CRAWL_DELAY_MIN", "3"))
-    CRAWL_DELAY_MAX: int = int(os.getenv("CRAWL_DELAY_MAX", "8"))
-    MAX_RETRY: int = int(os.getenv("MAX_RETRY", "3"))
-    BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "5"))  # 每次获取任务数量
-
-    # 分布式配置
-    WORKER_ID: str = os.getenv("WORKER_ID", "")  # 可手动指定worker标识，为空则自动生成
-    TASK_LOCK_TIMEOUT: int = int(os.getenv("TASK_LOCK_TIMEOUT", "600"))  # 任务锁定超时时间（秒），默认10分钟
-    HEARTBEAT_INTERVAL: int = int(os.getenv("HEARTBEAT_INTERVAL", "30"))  # 心跳间隔（秒）
-    WORKER_TIMEOUT: int = int(os.getenv("WORKER_TIMEOUT", "120"))  # Worker超时时间（秒）
-    MASTER_URL: str = os.getenv("MASTER_URL", "")  # Master服务器URL，为空则不使用Cookie池
-
-    # Cookie配置
-    LETPUB_COOKIE: str = os.getenv("LETPUB_COOKIE", "")
-
-    # 服务器配置
-    HOST: str = os.getenv("HOST", "0.0.0.0")
-    PORT: int = int(os.getenv("PORT", "8000"))
-
-    # 目标网站URL
+    @property
+    def DATABASE_URL(self) -> str:
+        db = self._app_config.get("database", {})
+        host = db.get("host", "localhost")
+        port = db.get("port", 5432)
+        name = db.get("name", "letpub_crawler")
+        user = db.get("user", "postgres")
+        password = db.get("password", "")
+        return f"postgresql://{user}:{password}@{host}:{port}/{name}"
+    
+    @property
+    def CRAWL_DELAY_MIN(self) -> int:
+        return int(get_nested(self._app_config, "crawler", "delay_min", default=3))
+    
+    @property
+    def CRAWL_DELAY_MAX(self) -> int:
+        return int(get_nested(self._app_config, "crawler", "delay_max", default=8))
+    
+    @property
+    def MAX_RETRY(self) -> int:
+        return int(get_nested(self._app_config, "crawler", "max_retry", default=3))
+    
+    @property
+    def BATCH_SIZE(self) -> int:
+        return int(get_nested(self._app_config, "crawler", "batch_size", default=5))
+    
+    @property
+    def WORKER_ID(self) -> str:
+        return str(get_nested(self._app_config, "distributed", "worker_id", default="") or "")
+    
+    @property
+    def TASK_LOCK_TIMEOUT(self) -> int:
+        return int(get_nested(self._app_config, "distributed", "task_lock_timeout", default=600))
+    
+    @property
+    def HEARTBEAT_INTERVAL(self) -> int:
+        return int(get_nested(self._app_config, "distributed", "heartbeat_interval", default=30))
+    
+    @property
+    def WORKER_TIMEOUT(self) -> int:
+        return int(get_nested(self._app_config, "distributed", "worker_timeout", default=120))
+    
+    @property
+    def MASTER_URL(self) -> str:
+        return str(get_nested(self._app_config, "distributed", "master_url", default="") or "")
+    
+    @property
+    def ENCRYPTION_KEY(self) -> str:
+        return str(get_nested(self._app_config, "encryption_key", default="") or "")
+    
+    # Cookie 配置（运行时可修改）
+    LETPUB_COOKIE: str = ""
+    
+    @property
+    def proxy_config(self) -> dict:
+        return self._proxy_config
+    
+    # 目标网站
     BASE_URL: str = "https://letpub.com.cn"
-    ENTRY_URL: str = f"{BASE_URL}/index.php?page=journalapp&view=researchfield&fieldtag=all&firstletter="
-
-    # User-Agent列表
+    
+    @property
+    def ENTRY_URL(self) -> str:
+        return f"{self.BASE_URL}/index.php?page=journalapp&view=researchfield&fieldtag=all&firstletter="
+    
     USER_AGENTS: list = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
@@ -53,5 +125,11 @@ class Config:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
     ]
+    
+    def reload(self):
+        """重新加载配置文件"""
+        self._app_config = load_yaml_config("app.yaml")
+        self._proxy_config = load_yaml_config("proxy.yaml")
+
 
 config = Config()
