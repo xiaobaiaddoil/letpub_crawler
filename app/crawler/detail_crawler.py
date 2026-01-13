@@ -77,18 +77,18 @@ class DetailCrawler(BaseCrawler):
         return detail
 
     def _validate_basic_info(self, info: Dict, journal_id: int) -> None:
-        """校验基本信息的完整性
+        """校验基本信息的完整性（放宽版本）
 
         Args:
             info: 提取的基本信息字典
             journal_id: 期刊ID（用于日志）
 
         Raises:
-            DataValidationError: 当数据不完整时抛出
+            DataValidationError: 仅当数据完全为空时抛出
         """
         extracted_fields = len(info)
 
-        # 检查是否为空
+        # 只检查是否完全为空
         if not info or extracted_fields == 0:
             raise DataValidationError(
                 f"期刊 {journal_id} 详情数据为空，未提取到任何字段",
@@ -96,28 +96,19 @@ class DetailCrawler(BaseCrawler):
                 extracted_fields=0
             )
 
-        # 检查必须存在的核心字段（至少需要其中一个）
+        # 只记录警告，不抛出异常
         has_required = any(
             field in info or field.lower() in [k.lower() for k in info.keys()]
             for field in self.REQUIRED_FIELDS
         )
 
         if not has_required:
-            raise DataValidationError(
-                f"期刊 {journal_id} 缺少核心字段，提取了 {extracted_fields} 个字段，但缺少: {self.REQUIRED_FIELDS}",
-                missing_fields=self.REQUIRED_FIELDS,
-                extracted_fields=extracted_fields
-            )
+            logger.warning(f"期刊 {journal_id} 缺少核心字段，提取了 {extracted_fields} 个字段")
 
-        # 检查字段数量是否达到最小期望
         if extracted_fields < self.MIN_EXPECTED_FIELDS:
-            # 检查重要字段
-            missing_important = [
-                field for field in self.IMPORTANT_FIELDS
-                if field not in info and field.lower() not in [k.lower() for k in info.keys()]
-            ]
-
-            raise DataValidationError(
+            logger.warning(f"期刊 {journal_id} 数据可能不完整，仅提取到 {extracted_fields} 个字段")
+        else:
+            logger.info(f"期刊 {journal_id} 数据校验通过，共 {extracted_fields} 个字段")
                 f"期刊 {journal_id} 数据不完整，仅提取到 {extracted_fields} 个字段（期望至少 {self.MIN_EXPECTED_FIELDS} 个）",
                 missing_fields=missing_important,
                 extracted_fields=extracted_fields

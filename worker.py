@@ -431,31 +431,29 @@ class DistributedWorker:
                         journal.detail_crawled = True
                         db.commit()  # 先提交期刊信息
 
-                        # 单独处理评论，避免重复错误影响期刊数据
+                        # 单独处理评论，先去重避免同批次重复
+                        seen_comment_ids = set()
                         for c_data in detail.get("comments", []):
                             comment_id = c_data.get("comment_id")
-                            if not comment_id:
+                            if not comment_id or comment_id in seen_comment_ids:
                                 continue
+                            seen_comment_ids.add(comment_id)
 
                             try:
-                                existing = db.query(Comment).filter(
-                                    Comment.comment_id == comment_id
-                                ).first()
-
-                                if not existing:
-                                    comment = Comment(
-                                        journal_id=journal.journal_id,
-                                        comment_id=comment_id,
-                                        content=c_data.get("content"),
-                                        author=c_data.get("author"),
-                                        rating=c_data.get("rating"),
-                                        submit_experience=c_data.get("submit_experience"),
-                                        comment_time=c_data.get("comment_time")
-                                    )
-                                    db.add(comment)
-                                    db.commit()
+                                # 使用 merge 避免重复插入问题
+                                from sqlalchemy.dialects.postgresql import insert
+                                stmt = insert(Comment).values(
+                                    journal_id=journal.journal_id,
+                                    comment_id=comment_id,
+                                    content=c_data.get("content"),
+                                    author=c_data.get("author"),
+                                    rating=c_data.get("rating"),
+                                    submit_experience=c_data.get("submit_experience"),
+                                    comment_time=c_data.get("comment_time")
+                                ).on_conflict_do_nothing(index_elements=['comment_id'])
+                                db.execute(stmt)
+                                db.commit()
                             except Exception:
-                                # 忽略重复插入错误
                                 db.rollback()
 
                         journal.comments_crawled = True
