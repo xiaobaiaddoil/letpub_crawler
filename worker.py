@@ -429,27 +429,34 @@ class DistributedWorker:
 
                         journal.detail_data = basic_info
                         journal.detail_crawled = True
+                        db.commit()  # 先提交期刊信息
 
+                        # 单独处理评论，避免重复错误影响期刊数据
                         for c_data in detail.get("comments", []):
                             comment_id = c_data.get("comment_id")
                             if not comment_id:
                                 continue
 
-                            existing = db.query(Comment).filter(
-                                Comment.comment_id == comment_id
-                            ).first()
+                            try:
+                                existing = db.query(Comment).filter(
+                                    Comment.comment_id == comment_id
+                                ).first()
 
-                            if not existing:
-                                comment = Comment(
-                                    journal_id=journal.journal_id,
-                                    comment_id=comment_id,
-                                    content=c_data.get("content"),
-                                    author=c_data.get("author"),
-                                    rating=c_data.get("rating"),
-                                    submit_experience=c_data.get("submit_experience"),
-                                    comment_time=c_data.get("comment_time")
-                                )
-                                db.add(comment)
+                                if not existing:
+                                    comment = Comment(
+                                        journal_id=journal.journal_id,
+                                        comment_id=comment_id,
+                                        content=c_data.get("content"),
+                                        author=c_data.get("author"),
+                                        rating=c_data.get("rating"),
+                                        submit_experience=c_data.get("submit_experience"),
+                                        comment_time=c_data.get("comment_time")
+                                    )
+                                    db.add(comment)
+                                    db.commit()
+                            except Exception:
+                                # 忽略重复插入错误
+                                db.rollback()
 
                         journal.comments_crawled = True
                         db.commit()
