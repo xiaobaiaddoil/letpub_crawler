@@ -1,0 +1,29 @@
+[project]
+name = "letpub-crawler"
+version = "0.1.0"
+description = "A distributed web crawler for scraping journal data from LetPub.com.cn"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+    "sqlalchemy>=2.0.0",
+    "psycopg2-binary>=2.9.0",
+    "playwright>=1.49.0",
+    "python-dotenv>=1.0.0",
+    "jinja2>=3.1.0",
+    "alembic>=1.14.0",
+    "python-multipart>=0.0.12",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=6.0.2",
+    "httpx>=0.27.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[dependency-groups]
+dev = []

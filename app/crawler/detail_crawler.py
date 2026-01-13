@@ -778,7 +778,7 @@ class DetailCrawler(BaseCrawler):
             time_str = comment.get("comment_time", "")
             # 生成唯一ID
             namespace = uuid.NAMESPACE_DNS
-            secure_name_uuid = uuid.uuid5(namespace, f"{journal_id}_{floor}_{author_name}")
+            secure_name_uuid = str(uuid.uuid5(namespace, f"{journal_id}_{floor}_{author_name}"))
             
             comment["comment_id"] = secure_name_uuid
 

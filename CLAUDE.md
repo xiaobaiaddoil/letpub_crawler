@@ -9,18 +9,22 @@ LetPub期刊爬虫系统 - A distributed web crawler for scraping journal data f
 ## Common Commands
 
 ```bash
+# Install uv (if not installed)
+# Windows: powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+# Linux/macOS: curl -LsSf https://astral.sh/uv/install.sh | sh
+
 # Install dependencies
-pip install -r requirements.txt
-playwright install chromium
+uv sync
+uv run playwright install chromium
 
 # Run master server (management UI only)
-RUN_MODE=master uvicorn app.main:app --host 0.0.0.0 --port 8000
+RUN_MODE=master uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 # Run standalone mode (UI + local crawler)
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 # Run worker node (crawler only)
-python worker.py --worker-id worker-01
+uv run python worker.py --worker-id worker-01
 
 # Run database migrations
 psql -h <host> -U <user> -d letpub_crawler -f migrations/<script>.sql

@@ -31,8 +31,9 @@ env/
 .vscode/
 *.swp
 *.swo
-# conda
-.conda
+
+# uv
+.python-version
 
 # Environment
 .env
