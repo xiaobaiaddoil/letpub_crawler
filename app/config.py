@@ -29,7 +29,7 @@ class Config:
 
     # 分布式配置
     WORKER_ID: str = os.getenv("WORKER_ID", "")  # 可手动指定worker标识，为空则自动生成
-    TASK_LOCK_TIMEOUT: int = int(os.getenv("TASK_LOCK_TIMEOUT", "300"))  # 任务锁定超时时间（秒）
+    TASK_LOCK_TIMEOUT: int = int(os.getenv("TASK_LOCK_TIMEOUT", "600"))  # 任务锁定超时时间（秒），默认10分钟
     HEARTBEAT_INTERVAL: int = int(os.getenv("HEARTBEAT_INTERVAL", "30"))  # 心跳间隔（秒）
     WORKER_TIMEOUT: int = int(os.getenv("WORKER_TIMEOUT", "120"))  # Worker超时时间（秒）
     MASTER_URL: str = os.getenv("MASTER_URL", "")  # Master服务器URL，为空则不使用Cookie池

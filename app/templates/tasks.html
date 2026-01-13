@@ -58,7 +58,7 @@
                     </span>
                 </td>
                 <td>{{ task.retry_count }} / {{ task.max_retry }}</td>
-                <td class="text-small">{{ task.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                <td class="text-small">{{ (task.created_at|localtime).strftime('%Y-%m-%d %H:%M') }}</td>
                 <td>
                     {% if task.status == 'failed' %}
                     <button class="btn btn-warning btn-sm" onclick="retryTask({{ task.id }})">重试</button>

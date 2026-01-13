@@ -27,6 +27,23 @@ clean_old_logs(days=7)
 templates_dir = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(templates_dir))
 
+
+# 添加时区转换过滤器（UTC -> 本地时间，中国时区 UTC+8）
+def utc_to_local(utc_dt):
+    """将UTC时间转换为本地时间（UTC+8）"""
+    if utc_dt is None:
+        return None
+    from datetime import timezone, timedelta
+    # 确保有时区信息
+    if utc_dt.tzinfo is None:
+        utc_dt = utc_dt.replace(tzinfo=timezone.utc)
+    # 转换为 UTC+8
+    local_tz = timezone(timedelta(hours=8))
+    return utc_dt.astimezone(local_tz)
+
+
+templates.env.filters["localtime"] = utc_to_local
+
 # 后台任务
 crawler_task = None
 

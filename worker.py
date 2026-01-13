@@ -317,6 +317,9 @@ class DistributedWorker:
                     field_tag = extra.get("field_tag")
                     page = extra.get("page", 1)
 
+                    # 续期任务锁定时间
+                    task_manager.renew_task_lock(task)
+
                     category = db.query(Category).filter(
                         Category.field_tag == field_tag
                     ).first()
@@ -393,6 +396,9 @@ class DistributedWorker:
 
                 try:
                     journal_id = int(task.target_id)
+
+                    # 续期任务锁定时间，防止长时间任务被误判为超时
+                    task_manager.renew_task_lock(task)
 
                     # 确保浏览器可用
                     await crawler.ensure_browser()

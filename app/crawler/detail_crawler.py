@@ -617,8 +617,7 @@ class DetailCrawler(BaseCrawler):
 
                     page += 1
 
-                    # 延迟，避免请求过快
-                    await self.random_delay()
+                    # 评论API请求不需要延时
 
                 except json.JSONDecodeError as e:
                     logger.error(f"解析JSON失败: {e}")

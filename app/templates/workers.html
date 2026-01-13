@@ -1,132 +1,147 @@
-{% extends "base.html" %}
-{% block title %}Worker管理 - LetPub爬虫{% endblock %}
+{% extends "base.html" %} {% block title %}Worker管理 - LetPub爬虫{% endblock %}
 {% block content %}
 <div class="card">
-    <div class="flex-between">
-        <h2>Worker节点管理</h2>
-        <div class="flex">
-            <span class="text-muted">运行模式: {{ run_mode }}</span>
-            <button class="btn btn-warning" onclick="cleanupOffline()">清理离线Worker</button>
-        </div>
+  <div class="flex-between">
+    <h2>Worker节点管理</h2>
+    <div class="flex">
+      <span class="text-muted">运行模式: {{ run_mode }}</span>
+      <button class="btn btn-warning" onclick="cleanupOffline()">
+        清理离线Worker
+      </button>
     </div>
+  </div>
 </div>
 
 <div class="card">
-    <h2>Worker列表</h2>
-    <table class="table">
-        <thead>
-            <tr>
-                <th>Worker ID</th>
-                <th>主机名</th>
-                <th>IP地址</th>
-                <th>状态</th>
-                <th>当前任务</th>
-                <th>累计完成</th>
-                <th>累计失败</th>
-                <th>最后心跳</th>
-                <th>操作</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for item in workers %}
-            <tr>
-                <td><code>{{ item.worker.worker_id[:20] }}...</code></td>
-                <td>{{ item.worker.hostname or '-' }}</td>
-                <td>{{ item.worker.ip_address or '-' }}</td>
-                <td>
-                    {% if item.is_online %}
-                        {% if item.running_tasks > 0 %}
-                        <span class="status status-running">运行中</span>
-                        {% else %}
-                        <span class="status status-completed">在线</span>
-                        {% endif %}
-                    {% else %}
-                    <span class="status status-failed">离线</span>
-                    {% endif %}
-                </td>
-                <td>{{ item.running_tasks }}</td>
-                <td>{{ item.worker.total_completed or 0 }}</td>
-                <td>{{ item.worker.total_failed or 0 }}</td>
-                <td>
-                    {% if item.worker.last_heartbeat %}
-                    {{ item.worker.last_heartbeat.strftime('%Y-%m-%d %H:%M:%S') }}
-                    {% else %}
-                    -
-                    {% endif %}
-                </td>
-                <td>
-                    <button class="btn btn-small btn-warning" onclick="releaseTasks('{{ item.worker.worker_id }}')">释放任务</button>
-                    {% if not item.is_online %}
-                    <button class="btn btn-small btn-danger" onclick="deleteWorker('{{ item.worker.worker_id }}')">删除</button>
-                    {% endif %}
-                </td>
-            </tr>
-            {% else %}
-            <tr>
-                <td colspan="9" class="text-center text-muted">暂无Worker节点</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+  <h2>Worker列表</h2>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Worker ID</th>
+        <th>主机名</th>
+        <th>IP地址</th>
+        <th>状态</th>
+        <th>当前任务</th>
+        <th>累计完成</th>
+        <th>累计失败</th>
+        <th>最后心跳</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in workers %}
+      <tr>
+        <td><code>{{ item.worker.worker_id[:20] }}...</code></td>
+        <td>{{ item.worker.hostname or '-' }}</td>
+        <td>{{ item.worker.ip_address or '-' }}</td>
+        <td>
+          {% if item.is_online %} {% if item.running_tasks > 0 %}
+          <span class="status status-running">运行中</span>
+          {% else %}
+          <span class="status status-completed">在线</span>
+          {% endif %} {% else %}
+          <span class="status status-failed">离线</span>
+          {% endif %}
+        </td>
+        <td>{{ item.running_tasks }}</td>
+        <td>{{ item.worker.total_completed or 0 }}</td>
+        <td>{{ item.worker.total_failed or 0 }}</td>
+        <td>
+          {% if item.worker.last_heartbeat %} {{
+          (item.worker.last_heartbeat|localtime).strftime('%Y-%m-%d %H:%M:%S')
+          }} {% else %} - {% endif %}
+        </td>
+        <td>
+          <button
+            class="btn btn-small btn-warning"
+            onclick="releaseTasks('{{ item.worker.worker_id }}')"
+          >
+            释放任务
+          </button>
+          {% if not item.is_online %}
+          <button
+            class="btn btn-small btn-danger"
+            onclick="deleteWorker('{{ item.worker.worker_id }}')"
+          >
+            删除
+          </button>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr>
+        <td colspan="9" class="text-center text-muted">暂无Worker节点</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
 </div>
 
 <div class="card">
-    <h2>部署说明</h2>
-    <div class="text-muted">
-        <p><strong>主服务器配置:</strong></p>
-        <pre>RUN_MODE=master
-DATABASE_URL=postgresql://user:pass@db-host:5432/letpub_crawler</pre>
+  <h2>部署说明</h2>
+  <div class="text-muted">
+    <p><strong>主服务器配置:</strong></p>
+    <pre>
+RUN_MODE=master
+DATABASE_URL=postgresql://user:pass@db-host:5432/letpub_crawler</pre
+    >
 
-        <p><strong>Worker节点配置:</strong></p>
-        <pre>DATABASE_URL=postgresql://user:pass@db-host:5432/letpub_crawler
-WORKER_ID=worker-01  # 可选，不设置则自动生成</pre>
+    <p><strong>Worker节点配置:</strong></p>
+    <pre>
+DATABASE_URL=postgresql://user:pass@db-host:5432/letpub_crawler
+WORKER_ID=worker-01  # 可选，不设置则自动生成</pre
+    >
 
-        <p><strong>启动Worker:</strong></p>
-        <pre>python worker.py --worker-id worker-01</pre>
-    </div>
+    <p><strong>启动Worker:</strong></p>
+    <pre>python worker.py --worker-id worker-01</pre>
+  </div>
 </div>
-{% endblock %}
-
-{% block scripts %}
+{% endblock %} {% block scripts %}
 <script>
-    async function releaseTasks(workerId) {
-        if (!confirm('确定要释放该Worker的所有任务吗？')) return;
+  async function releaseTasks(workerId) {
+    if (!confirm("确定要释放该Worker的所有任务吗？")) return;
 
-        const response = await fetch(`/api/workers/${encodeURIComponent(workerId)}/release-tasks`, {
-            method: 'POST'
-        });
-        const result = await response.json();
-        alert(result.message);
-        location.reload();
+    const response = await fetch(
+      `/api/workers/${encodeURIComponent(workerId)}/release-tasks`,
+      {
+        method: "POST",
+      }
+    );
+    const result = await response.json();
+    alert(result.message);
+    location.reload();
+  }
+
+  async function deleteWorker(workerId) {
+    if (!confirm("确定要删除该Worker记录吗？")) return;
+
+    const response = await fetch(
+      `/api/workers/${encodeURIComponent(workerId)}`,
+      {
+        method: "DELETE",
+      }
+    );
+    const result = await response.json();
+    if (response.ok) {
+      alert(result.message);
+      location.reload();
+    } else {
+      alert("删除失败: " + result.detail);
     }
+  }
 
-    async function deleteWorker(workerId) {
-        if (!confirm('确定要删除该Worker记录吗？')) return;
+  async function cleanupOffline() {
+    if (!confirm("确定要清理所有离线Worker并释放其任务吗？")) return;
 
-        const response = await fetch(`/api/workers/${encodeURIComponent(workerId)}`, {
-            method: 'DELETE'
-        });
-        const result = await response.json();
-        if (response.ok) {
-            alert(result.message);
-            location.reload();
-        } else {
-            alert('删除失败: ' + result.detail);
-        }
-    }
+    const response = await fetch("/api/workers/cleanup-offline", {
+      method: "POST",
+    });
+    const result = await response.json();
+    alert(result.message);
+    location.reload();
+  }
 
-    async function cleanupOffline() {
-        if (!confirm('确定要清理所有离线Worker并释放其任务吗？')) return;
-
-        const response = await fetch('/api/workers/cleanup-offline', {
-            method: 'POST'
-        });
-        const result = await response.json();
-        alert(result.message);
-        location.reload();
-    }
-
-    // 每30秒刷新页面
-    setTimeout(() => location.reload(), 30000);
+  // 每30秒刷新页面
+  setTimeout(() => location.reload(), 30000);
 </script>
 {% endblock %}

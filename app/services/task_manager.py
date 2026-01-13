@@ -249,6 +249,13 @@ class TaskManager:
         self.db.commit()
         logger.info(f"完成任务: {task.id} by {self.worker_id}")
 
+    def renew_task_lock(self, task: CrawlTask):
+        """续期任务锁定时间（防止长时间任务被误判为超时）"""
+        now = get_utc_now()
+        task.locked_at = now
+        self.db.commit()
+        logger.debug(f"续期任务锁: {task.id}")
+
     def fail_task(self, task: CrawlTask, error: str):
         """任务失败"""
         now = get_utc_now()
