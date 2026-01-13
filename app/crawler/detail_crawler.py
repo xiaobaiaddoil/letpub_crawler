@@ -12,15 +12,46 @@ from app.config import config
 logger = logging.getLogger(__name__)
 
 
+class DataValidationError(Exception):
+    """数据校验失败异常"""
+    def __init__(self, message: str, missing_fields: List[str] = None, extracted_fields: int = 0):
+        super().__init__(message)
+        self.missing_fields = missing_fields or []
+        self.extracted_fields = extracted_fields
+
+
 class DetailCrawler(BaseCrawler):
     """详情页爬虫 - 爬取期刊详情和评论"""
+
+    # 必须存在的核心字段（至少需要其中一个）
+    REQUIRED_FIELDS = ['期刊名字', 'issn', '期刊ISSN']
+
+    # 期望存在的重要字段（用于评估数据完整性）
+    IMPORTANT_FIELDS = [
+        'issn', '期刊ISSN', 'impact_factor', '最新影响因子',
+        'jcr_partition', 'JCR分区', 'cas_partition'
+    ]
+
+    # 最小期望字段数量（提取的字段数少于此值认为数据不完整）
+    MIN_EXPECTED_FIELDS = 5
 
     def _build_detail_url(self, journal_id: int) -> str:
         """构建详情页URL"""
         return f"{config.BASE_URL}/index.php?journalid={journal_id}&page=journalapp&view=detail"
 
-    async def crawl(self, journal_id: int) -> Dict:
-        """爬取期刊详情"""
+    async def crawl(self, journal_id: int, validate: bool = True) -> Dict:
+        """爬取期刊详情
+
+        Args:
+            journal_id: 期刊ID
+            validate: 是否校验数据完整性，默认为True
+
+        Returns:
+            包含basic_info和comments的字典
+
+        Raises:
+            DataValidationError: 当validate=True且数据校验失败时抛出
+        """
         url = self._build_detail_url(journal_id)
 
         success = await self.goto(url)
@@ -36,10 +67,63 @@ class DetailCrawler(BaseCrawler):
         # 提取基本信息（表格结构）
         detail["basic_info"] = await self._extract_basic_info()
 
+        # 校验数据完整性
+        if validate:
+            self._validate_basic_info(detail["basic_info"], journal_id)
+
         # 通过API提取评论（更高效）
         detail["comments"] = await self._fetch_comments_from_api(journal_id)
 
         return detail
+
+    def _validate_basic_info(self, info: Dict, journal_id: int) -> None:
+        """校验基本信息的完整性
+
+        Args:
+            info: 提取的基本信息字典
+            journal_id: 期刊ID（用于日志）
+
+        Raises:
+            DataValidationError: 当数据不完整时抛出
+        """
+        extracted_fields = len(info)
+
+        # 检查是否为空
+        if not info or extracted_fields == 0:
+            raise DataValidationError(
+                f"期刊 {journal_id} 详情数据为空，未提取到任何字段",
+                missing_fields=self.REQUIRED_FIELDS,
+                extracted_fields=0
+            )
+
+        # 检查必须存在的核心字段（至少需要其中一个）
+        has_required = any(
+            field in info or field.lower() in [k.lower() for k in info.keys()]
+            for field in self.REQUIRED_FIELDS
+        )
+
+        if not has_required:
+            raise DataValidationError(
+                f"期刊 {journal_id} 缺少核心字段，提取了 {extracted_fields} 个字段，但缺少: {self.REQUIRED_FIELDS}",
+                missing_fields=self.REQUIRED_FIELDS,
+                extracted_fields=extracted_fields
+            )
+
+        # 检查字段数量是否达到最小期望
+        if extracted_fields < self.MIN_EXPECTED_FIELDS:
+            # 检查重要字段
+            missing_important = [
+                field for field in self.IMPORTANT_FIELDS
+                if field not in info and field.lower() not in [k.lower() for k in info.keys()]
+            ]
+
+            raise DataValidationError(
+                f"期刊 {journal_id} 数据不完整，仅提取到 {extracted_fields} 个字段（期望至少 {self.MIN_EXPECTED_FIELDS} 个）",
+                missing_fields=missing_important,
+                extracted_fields=extracted_fields
+            )
+
+        logger.info(f"期刊 {journal_id} 数据校验通过，共 {extracted_fields} 个字段")
 
     async def _extract_basic_info(self) -> Dict:
         """提取基本信息 - 处理表格结构（包括嵌套表格）"""

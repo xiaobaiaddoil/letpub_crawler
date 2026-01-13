@@ -11,7 +11,7 @@ from app.models.journal import Journal
 from app.models.comment import Comment
 from app.crawler.category_crawler import CategoryCrawler
 from app.crawler.list_crawler import ListCrawler
-from app.crawler.detail_crawler import DetailCrawler
+from app.crawler.detail_crawler import DetailCrawler, DataValidationError
 from app.database import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -291,6 +291,13 @@ class CrawlerService:
                         db.commit()
 
                 task_manager.complete_task(task)
+
+            except DataValidationError as e:
+                # 数据校验失败 - 任务标记为失败，可重试
+                db.rollback()
+                error_msg = f"数据校验失败: {str(e)}, 提取字段数: {e.extracted_fields}, 缺失字段: {e.missing_fields}"
+                logger.warning(f"期刊 {task.target_id} {error_msg}")
+                task_manager.fail_task(task, error_msg)
 
             except Exception as e:
                 db.rollback()  # 回滚事务
