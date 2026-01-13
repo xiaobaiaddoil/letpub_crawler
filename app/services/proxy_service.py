@@ -87,12 +87,9 @@ class ProxyService:
         else:
             proxy.fail_count += 1
             proxy.total_fail_count += 1
-            
-            # 隧道代理不因失败而禁用（IP会自动切换）
-            # 私密代理失败后标记无效，下次会重新获取
-            if proxy.proxy_type == "private" and proxy.fail_count >= self.MAX_FAIL_COUNT:
-                proxy.is_valid = False
-                logger.warning(f"私密代理 {proxy.ip}:{proxy.port} 连续失败，已标记无效")
+            # 失败一次即标记为无效
+            proxy.is_valid = False
+            logger.warning(f"[代理] {proxy.ip}:{proxy.port} 请求失败，已标记无效")
         
         self.db.commit()
 

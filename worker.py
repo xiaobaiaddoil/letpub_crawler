@@ -67,10 +67,8 @@ def clean_numeric_value(value):
 class DistributedWorker:
     """分布式爬虫Worker"""
 
-    # 失败休眠配置
-    FAILURE_WINDOW_SECONDS = 60  # 统计失败的时间窗口（秒）
-    MAX_FAILURES_BEFORE_SLEEP = 5  # 触发休眠的失败次数
-    FAILURE_SLEEP_SECONDS = 120  # 休眠时长（秒）
+    # 直连失败休眠配置
+    DIRECT_FAIL_SLEEP_SECONDS = 20  # 直连失败休眠时长（秒）
 
     def __init__(self, worker_id: str = None):
         self.worker_id = worker_id or generate_worker_id()
@@ -78,7 +76,6 @@ class DistributedWorker:
         self.ip_address = self._get_ip_address()
         self._running = False
         self._paused = False
-        self._recent_failures = []  # 记录最近失败的时间戳
 
         # 确保失败HTML存储目录存在
         self.failed_html_dir = Path("logs/failed_html")
@@ -116,32 +113,16 @@ class DistributedWorker:
         except Exception as e:
             logger.warning(f"保存失败HTML时出错: {e}")
 
-    def _record_failure(self):
-        """记录一次失败，返回是否需要休眠"""
-        now = datetime.now().timestamp()
+    async def _handle_request_failure(self, crawler):
+        """处理请求失败：如果是直连失败则休眠20秒
         
-        # 清理过期的失败记录
-        cutoff = now - self.FAILURE_WINDOW_SECONDS
-        self._recent_failures = [t for t in self._recent_failures if t > cutoff]
-        
-        # 记录本次失败
-        self._recent_failures.append(now)
-        
-        # 检查是否需要休眠
-        if len(self._recent_failures) >= self.MAX_FAILURES_BEFORE_SLEEP:
-            logger.warning(
-                f"短时间内失败 {len(self._recent_failures)} 次，"
-                f"将休眠 {self.FAILURE_SLEEP_SECONDS} 秒"
-            )
-            self._recent_failures.clear()  # 清空记录，休眠后重新计数
-            return True
-        return False
-
-    async def _sleep_on_failures(self):
-        """失败过多时休眠"""
-        logger.info(f"开始休眠 {self.FAILURE_SLEEP_SECONDS} 秒...")
-        await asyncio.sleep(self.FAILURE_SLEEP_SECONDS)
-        logger.info("休眠结束，继续工作")
+        Args:
+            crawler: 爬虫实例，用于判断是否使用直连
+        """
+        if crawler and crawler.is_using_direct():
+            logger.warning(f"[直连] 请求失败，休眠 {self.DIRECT_FAIL_SLEEP_SECONDS} 秒...")
+            await asyncio.sleep(self.DIRECT_FAIL_SLEEP_SECONDS)
+            logger.info("[直连] 休眠结束，继续工作")
 
     async def register(self):
         """向数据库注册Worker"""
@@ -346,9 +327,8 @@ class DistributedWorker:
                 await crawler.report_proxy_result(success=False)
             await self.increment_stats(failed=1)
             
-            # 检查是否需要休眠
-            if self._record_failure():
-                await self._sleep_on_failures()
+            # 如果是直连失败，休眠20秒
+            await self._handle_request_failure(crawler)
         finally:
             if crawler:
                 await crawler.close()
@@ -436,9 +416,8 @@ class DistributedWorker:
                         await crawler.report_proxy_result(success=False)
                     failed += 1
                     
-                    # 检查是否需要休眠
-                    if self._record_failure():
-                        await self._sleep_on_failures()
+                    # 如果是直连失败，休眠20秒
+                    await self._handle_request_failure(crawler)
 
         finally:
             if crawler:
@@ -559,9 +538,8 @@ class DistributedWorker:
                         await crawler.report_proxy_result(success=False)
                     failed += 1
                     
-                    # 检查是否需要休眠
-                    if self._record_failure():
-                        await self._sleep_on_failures()
+                    # 如果是直连失败，休眠20秒
+                    await self._handle_request_failure(crawler)
 
         finally:
             if crawler:

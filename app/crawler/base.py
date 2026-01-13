@@ -22,6 +22,7 @@ class BaseCrawler(ABC):
         self._current_cookie_info: Optional[Dict] = None  # 当前使用的 Cookie 信息
         # 代理相关
         self._current_proxy_info: Optional[Dict] = None  # 当前使用的代理信息
+        self._using_direct: bool = False  # 是否使用直连（无代理）
 
     async def _get_proxy_from_pool(self) -> Optional[Dict]:
         """从 Master 服务器的代理池获取代理"""
@@ -89,6 +90,8 @@ class BaseCrawler(ABC):
         
         # 获取代理
         proxy_config = None
+        self._using_direct = False
+        
         if use_proxy:
             proxy_info = await self._get_proxy_from_pool()
             if proxy_info:
@@ -103,8 +106,11 @@ class BaseCrawler(ABC):
                 else:
                     logger.info(f"[代理] 使用私密代理: {proxy_info['ip']}:{proxy_info['port']}")
             else:
-                logger.info("[代理] 未获取到代理，使用直连")
+                # 无可用代理，使用直连
+                self._using_direct = True
+                logger.warning("[代理] 无可用代理，使用直连")
         else:
+            self._using_direct = True
             logger.info("[代理] 已禁用代理，使用直连")
         
         self.browser = await self._playwright.chromium.launch(
@@ -213,6 +219,10 @@ class BaseCrawler(ABC):
         if self._current_proxy_info:
             return f"{self._current_proxy_info.get('ip')}:{self._current_proxy_info.get('port')}"
         return "直连"
+
+    def is_using_direct(self) -> bool:
+        """是否使用直连（无代理）"""
+        return self._using_direct
 
     async def random_delay(self):
         """随机延迟"""
