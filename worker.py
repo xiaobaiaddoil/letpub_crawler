@@ -67,12 +67,22 @@ def clean_numeric_value(value):
 class DistributedWorker:
     """分布式爬虫Worker"""
 
+    # 失败休眠配置
+    FAILURE_WINDOW_SECONDS = 60  # 统计失败的时间窗口（秒）
+    MAX_FAILURES_BEFORE_SLEEP = 5  # 触发休眠的失败次数
+    FAILURE_SLEEP_SECONDS = 120  # 休眠时长（秒）
+
     def __init__(self, worker_id: str = None):
         self.worker_id = worker_id or generate_worker_id()
         self.hostname = socket.gethostname()
         self.ip_address = self._get_ip_address()
         self._running = False
         self._paused = False
+        self._recent_failures = []  # 记录最近失败的时间戳
+
+        # 确保失败HTML存储目录存在
+        self.failed_html_dir = Path("logs/failed_html")
+        self.failed_html_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info(f"Worker初始化: {self.worker_id}")
         logger.info(f"主机: {self.hostname}, IP: {self.ip_address}")
@@ -87,6 +97,51 @@ class DistributedWorker:
             return ip
         except Exception:
             return "127.0.0.1"
+
+    async def _save_failed_html(self, crawler, task_id: str, error: str):
+        """保存失败任务的HTML内容"""
+        try:
+            if crawler and crawler.page:
+                html_content = await crawler.page.content()
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = self.failed_html_dir / f"task_{task_id}_{timestamp}.html"
+                
+                # 在HTML头部添加错误信息注释
+                error_comment = f"<!-- \nTask ID: {task_id}\nError: {error}\nTime: {timestamp}\n-->\n"
+                
+                with open(filename, "w", encoding="utf-8") as f:
+                    f.write(error_comment + html_content)
+                
+                logger.info(f"已保存失败页面HTML: {filename}")
+        except Exception as e:
+            logger.warning(f"保存失败HTML时出错: {e}")
+
+    def _record_failure(self):
+        """记录一次失败，返回是否需要休眠"""
+        now = datetime.now().timestamp()
+        
+        # 清理过期的失败记录
+        cutoff = now - self.FAILURE_WINDOW_SECONDS
+        self._recent_failures = [t for t in self._recent_failures if t > cutoff]
+        
+        # 记录本次失败
+        self._recent_failures.append(now)
+        
+        # 检查是否需要休眠
+        if len(self._recent_failures) >= self.MAX_FAILURES_BEFORE_SLEEP:
+            logger.warning(
+                f"短时间内失败 {len(self._recent_failures)} 次，"
+                f"将休眠 {self.FAILURE_SLEEP_SECONDS} 秒"
+            )
+            self._recent_failures.clear()  # 清空记录，休眠后重新计数
+            return True
+        return False
+
+    async def _sleep_on_failures(self):
+        """失败过多时休眠"""
+        logger.info(f"开始休眠 {self.FAILURE_SLEEP_SECONDS} 秒...")
+        await asyncio.sleep(self.FAILURE_SLEEP_SECONDS)
+        logger.info("休眠结束，继续工作")
 
     async def register(self):
         """向数据库注册Worker"""
@@ -277,12 +332,21 @@ class DistributedWorker:
 
         except Exception as e:
             db.rollback()
+            error_msg = str(e)
             logger.exception("处理分类任务失败")
-            task_manager.fail_task(task, str(e))
+            
+            # 保存失败页面的HTML
+            await self._save_failed_html(crawler, "category", error_msg)
+            
+            task_manager.fail_task(task, error_msg)
             # 报告 Cookie 使用失败
             if crawler:
                 await crawler.report_cookie_result(success=False)
             await self.increment_stats(failed=1)
+            
+            # 检查是否需要休眠
+            if self._record_failure():
+                await self._sleep_on_failures()
         finally:
             if crawler:
                 await crawler.close()
@@ -356,12 +420,21 @@ class DistributedWorker:
 
                 except Exception as e:
                     db.rollback()
+                    error_msg = str(e)
                     logger.exception(f"处理列表任务失败: {task.target_id}")
-                    task_manager.fail_task(task, str(e))
+                    
+                    # 保存失败页面的HTML
+                    await self._save_failed_html(crawler, task.target_id, error_msg)
+                    
+                    task_manager.fail_task(task, error_msg)
                     # 报告 Cookie 使用失败
                     if crawler:
                         await crawler.report_cookie_result(success=False)
                     failed += 1
+                    
+                    # 检查是否需要休眠
+                    if self._record_failure():
+                        await self._sleep_on_failures()
 
         finally:
             if crawler:
@@ -466,12 +539,21 @@ class DistributedWorker:
 
                 except Exception as e:
                     db.rollback()
+                    error_msg = str(e)
                     logger.exception(f"处理详情任务失败: {task.target_id}")
-                    task_manager.fail_task(task, str(e))
+                    
+                    # 保存失败页面的HTML
+                    await self._save_failed_html(crawler, task.target_id, error_msg)
+                    
+                    task_manager.fail_task(task, error_msg)
                     # 报告 Cookie 使用失败
                     if crawler:
                         await crawler.report_cookie_result(success=False)
                     failed += 1
+                    
+                    # 检查是否需要休眠
+                    if self._record_failure():
+                        await self._sleep_on_failures()
 
         finally:
             if crawler:
