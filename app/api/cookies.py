@@ -166,8 +166,14 @@ def report_cookie_success(cookie_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{cookie_id}/report-fail")
-def report_cookie_fail(cookie_id: int, db: Session = Depends(get_db)):
-    """报告Cookie使用失败（供Worker调用）"""
+async def report_cookie_fail(cookie_id: int, db: Session = Depends(get_db)):
+    """报告Cookie使用失败（供Worker调用）
+    
+    当失败次数达到阈值时，自动尝试重新登录刷新Cookie
+    """
+    from app.services.auth_service import AuthService, COOKIE_FAIL_THRESHOLD
+    from app.models.account import Account
+
     cookie = db.query(CookiePool).filter(CookiePool.id == cookie_id).first()
     if not cookie:
         raise HTTPException(status_code=404, detail="Cookie不存在")
@@ -176,7 +182,29 @@ def report_cookie_fail(cookie_id: int, db: Session = Depends(get_db)):
     cookie.last_fail_at = datetime.now(timezone.utc)
     db.commit()
 
-    return {"message": "已记录失败"}
+    # 检查是否需要自动刷新
+    need_refresh = cookie.fail_count >= COOKIE_FAIL_THRESHOLD and cookie.name.startswith("auto_")
+    refreshed = False
+
+    if need_refresh:
+        # 从Cookie名称提取邮箱
+        email = cookie.name.replace("auto_", "")
+        account = db.query(Account).filter(
+            Account.email == email,
+            Account.is_active == True
+        ).first()
+
+        if account:
+            logger.info(f"Cookie {cookie.name} 失败次数达到阈值，尝试重新登录...")
+            auth_service = AuthService(db)
+            result = await auth_service.refresh_cookie_for_account(account)
+            refreshed = result is not None
+
+    return {
+        "message": "已记录失败",
+        "fail_count": cookie.fail_count,
+        "auto_refreshed": refreshed
+    }
 
 
 @router.get("/{cookie_id}", response_model=CookieResponse)

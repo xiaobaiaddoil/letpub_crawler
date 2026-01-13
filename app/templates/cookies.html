@@ -1,216 +1,549 @@
-{% extends "base.html" %}
-{% block title %}Cookie池管理 - LetPub爬虫{% endblock %}
-{% block content %}
+{% extends "base.html" %} {% block title %}Cookie池管理 - LetPub爬虫{% endblock
+%} {% block content %}
+<!-- 账号管理区域 -->
 <div class="card">
-    <div class="flex-between">
-        <h2>Cookie池管理</h2>
-        <div class="flex">
-            <span class="text-muted">可用Cookie: <strong id="active-count">{{ active_count }}</strong> / {{ total }}</span>
-            <button class="btn btn-primary" onclick="showAddModal()">添加Cookie</button>
-        </div>
+  <div class="flex-between">
+    <h2>🔐 账号管理</h2>
+    <div class="flex">
+      <span class="text-muted"
+        >活跃账号:
+        <strong id="account-count">{{ accounts|length }}</strong></span
+      >
+      <button class="btn btn-primary" onclick="showAddAccountModal()">
+        添加账号
+      </button>
+      <button class="btn btn-success" onclick="refreshAllCookies()">
+        刷新所有Cookie
+      </button>
     </div>
+  </div>
+  <p class="text-muted" style="margin: 10px 0">
+    通过账号密码自动登录获取Cookie，无需手动复制。密码加密存储。
+  </p>
+
+  <table class="table">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>邮箱</th>
+        <th>状态</th>
+        <th>登录成功</th>
+        <th>登录失败</th>
+        <th>最后登录</th>
+        <th>最后刷新Cookie</th>
+        <th>备注</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody id="account-list">
+      {% for account in accounts %}
+      <tr id="account-{{ account.id }}">
+        <td>{{ account.id }}</td>
+        <td>{{ account.email }}</td>
+        <td>
+          {% if account.is_active %}
+          <span class="status status-completed">启用</span>
+          {% else %}
+          <span class="status status-failed">禁用</span>
+          {% endif %}
+        </td>
+        <td class="text-success">{{ account.login_success_count }}</td>
+        <td class="text-danger">{{ account.login_fail_count }}</td>
+        <td>
+          {% if account.last_login_at %} {{
+          account.last_login_at.strftime('%Y-%m-%d %H:%M') }} {% else %} - {%
+          endif %}
+        </td>
+        <td>
+          {% if account.last_cookie_refresh_at %} {{
+          account.last_cookie_refresh_at.strftime('%Y-%m-%d %H:%M') }} {% else
+          %} - {% endif %}
+        </td>
+        <td>{{ account.remark or '-' }}</td>
+        <td>
+          <button
+            class="btn btn-sm btn-success"
+            onclick="loginAccount({{ account.id }})"
+            title="登录获取Cookie"
+          >
+            登录
+          </button>
+          <button
+            class="btn btn-sm {% if account.is_active %}btn-warning{% else %}btn-primary{% endif %}"
+            onclick="toggleAccount({{ account.id }})"
+          >
+            {% if account.is_active %}禁用{% else %}启用{% endif %}
+          </button>
+          <button
+            class="btn btn-sm btn-danger"
+            onclick="deleteAccount({{ account.id }}, '{{ account.email }}')"
+          >
+            删除
+          </button>
+        </td>
+      </tr>
+      {% else %}
+      <tr>
+        <td colspan="9" class="text-center text-muted">
+          暂无账号，请点击"添加账号"添加
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<!-- Cookie池区域 -->
+<div class="card">
+  <div class="flex-between">
+    <h2>🍪 Cookie池</h2>
+    <div class="flex">
+      <span class="text-muted"
+        >可用Cookie: <strong id="active-count">{{ active_count }}</strong> / {{
+        total }}</span
+      >
+      <button class="btn btn-primary" onclick="showAddCookieModal()">
+        手动添加Cookie
+      </button>
+    </div>
+  </div>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>名称</th>
+        <th>Cookie值</th>
+        <th>状态</th>
+        <th>成功次数</th>
+        <th>失败次数</th>
+        <th>最后使用</th>
+        <th>备注</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody id="cookie-list">
+      {% for cookie in cookies %}
+      <tr id="cookie-{{ cookie.id }}">
+        <td>{{ cookie.id }}</td>
+        <td>
+          {{ cookie.name }} {% if cookie.name.startswith('auto_') %}
+          <span class="status status-running" style="font-size: 10px"
+            >自动</span
+          >
+          {% endif %}
+        </td>
+        <td>
+          <code title="{{ cookie.cookie_value }}"
+            >{{ cookie.cookie_value[:30] }}{% if cookie.cookie_value|length > 30
+            %}...{% endif %}</code
+          >
+        </td>
+        <td>
+          {% if cookie.is_active %}
+          <span class="status status-completed">启用</span>
+          {% else %}
+          <span class="status status-failed">禁用</span>
+          {% endif %}
+        </td>
+        <td class="text-success">{{ cookie.success_count }}</td>
+        <td class="text-danger">{{ cookie.fail_count }}</td>
+        <td>
+          {% if cookie.last_used_at %} {{ cookie.last_used_at.strftime('%Y-%m-%d
+          %H:%M') }} {% else %} - {% endif %}
+        </td>
+        <td>{{ cookie.remark or '-' }}</td>
+        <td>
+          <button
+            class="btn btn-sm btn-primary"
+            onclick="editCookie({{ cookie.id }}, '{{ cookie.name }}', '{{ cookie.cookie_value }}', '{{ cookie.remark or '' }}')"
+          >
+            编辑
+          </button>
+          <button
+            class="btn btn-sm {% if cookie.is_active %}btn-warning{% else %}btn-success{% endif %}"
+            onclick="toggleCookie({{ cookie.id }})"
+          >
+            {% if cookie.is_active %}禁用{% else %}启用{% endif %}
+          </button>
+          <button
+            class="btn btn-sm btn-danger"
+            onclick="deleteCookie({{ cookie.id }}, '{{ cookie.name }}')"
+          >
+            删除
+          </button>
+        </td>
+      </tr>
+      {% else %}
+      <tr>
+        <td colspan="9" class="text-center text-muted">暂无Cookie</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
 </div>
 
 <div class="card">
-    <h2>Cookie列表</h2>
-    <table class="table">
-        <thead>
-            <tr>
-                <th>ID</th>
-                <th>名称</th>
-                <th>Cookie值</th>
-                <th>状态</th>
-                <th>成功次数</th>
-                <th>失败次数</th>
-                <th>最后使用</th>
-                <th>备注</th>
-                <th>操作</th>
-            </tr>
-        </thead>
-        <tbody id="cookie-list">
-            {% for cookie in cookies %}
-            <tr id="cookie-{{ cookie.id }}">
-                <td>{{ cookie.id }}</td>
-                <td>{{ cookie.name }}</td>
-                <td>
-                    <code title="{{ cookie.cookie_value }}">{{ cookie.cookie_value[:30] }}{% if cookie.cookie_value|length > 30 %}...{% endif %}</code>
-                </td>
-                <td>
-                    {% if cookie.is_active %}
-                    <span class="status status-completed">启用</span>
-                    {% else %}
-                    <span class="status status-failed">禁用</span>
-                    {% endif %}
-                </td>
-                <td class="text-success">{{ cookie.success_count }}</td>
-                <td class="text-danger">{{ cookie.fail_count }}</td>
-                <td>
-                    {% if cookie.last_used_at %}
-                    {{ cookie.last_used_at.strftime('%Y-%m-%d %H:%M') }}
-                    {% else %}
-                    -
-                    {% endif %}
-                </td>
-                <td>{{ cookie.remark or '-' }}</td>
-                <td>
-                    <button class="btn btn-sm btn-primary" onclick="editCookie({{ cookie.id }}, '{{ cookie.name }}', '{{ cookie.cookie_value }}', '{{ cookie.remark or '' }}')">编辑</button>
-                    <button class="btn btn-sm {% if cookie.is_active %}btn-warning{% else %}btn-success{% endif %}" onclick="toggleCookie({{ cookie.id }})">
-                        {% if cookie.is_active %}禁用{% else %}启用{% endif %}
-                    </button>
-                    <button class="btn btn-sm btn-danger" onclick="deleteCookie({{ cookie.id }}, '{{ cookie.name }}')">删除</button>
-                </td>
-            </tr>
-            {% else %}
-            <tr>
-                <td colspan="9" class="text-center text-muted">暂无Cookie，请点击"添加Cookie"添加</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+  <h2>📖 使用说明</h2>
+  <div class="text-muted">
+    <p><strong>方式一：账号自动登录（推荐）</strong></p>
+    <ol>
+      <li>点击"添加账号"，输入 LetPub 邮箱和密码</li>
+      <li>点击"登录"按钮，系统自动登录并获取Cookie</li>
+      <li>Cookie失败次数过多时会自动重新登录刷新</li>
+    </ol>
+
+    <p><strong>方式二：手动添加Cookie</strong></p>
+    <ol>
+      <li>在浏览器中登录 LetPub 网站</li>
+      <li>打开浏览器开发者工具 (F12) -> Application -> Cookies</li>
+      <li>复制 <code>PHPSESSID</code> 的值</li>
+      <li>点击"手动添加Cookie"，格式: <code>PHPSESSID=xxxxxx</code></li>
+    </ol>
+
+    <p><strong>Worker配置:</strong></p>
+    <p>Worker节点需要配置 <code>MASTER_URL</code> 环境变量：</p>
+    <pre>MASTER_URL=http://master-server:8000</pre>
+  </div>
 </div>
 
-<div class="card">
-    <h2>使用说明</h2>
-    <div class="text-muted">
-        <p><strong>如何获取Cookie:</strong></p>
-        <ol>
-            <li>在浏览器中登录 LetPub 网站</li>
-            <li>打开浏览器开发者工具 (F12) -> Application -> Cookies</li>
-            <li>复制 <code>PHPSESSID</code> 的值</li>
-            <li>将Cookie值添加到这里，格式: <code>PHPSESSID=xxxxxx</code> 或直接输入值</li>
-        </ol>
-
-        <p><strong>Worker配置:</strong></p>
-        <p>Worker节点需要配置 <code>MASTER_URL</code> 环境变量，指向Master服务器地址：</p>
-        <pre>MASTER_URL=http://master-server:8000</pre>
-
-        <p><strong>Cookie使用逻辑:</strong></p>
-        <ul>
-            <li>Worker请求评论时，会从Master随机选择一个可用Cookie</li>
-            <li>请求成功/失败后会自动更新统计信息</li>
-            <li>失败次数过多的Cookie建议手动禁用或删除</li>
-        </ul>
-    </div>
+<!-- 添加账号模态框 -->
+<div id="account-modal" class="modal" style="display: none">
+  <div class="modal-content">
+    <h3 id="account-modal-title" style="margin-bottom: 20px">添加账号</h3>
+    <form id="account-form" onsubmit="saveAccount(event)">
+      <div class="form-group">
+        <label>邮箱 *</label>
+        <input
+          type="email"
+          id="account-email"
+          required
+          placeholder="LetPub登录邮箱"
+        />
+      </div>
+      <div class="form-group">
+        <label>密码 *</label>
+        <input
+          type="password"
+          id="account-password"
+          required
+          placeholder="LetPub登录密码"
+        />
+      </div>
+      <div class="form-group">
+        <label>备注</label>
+        <input type="text" id="account-remark" placeholder="可选备注" />
+      </div>
+      <div class="flex" style="justify-content: flex-end; gap: 10px">
+        <button
+          type="button"
+          class="btn"
+          onclick="hideAccountModal()"
+          style="background: #eee"
+        >
+          取消
+        </button>
+        <button type="submit" class="btn btn-primary">保存</button>
+      </div>
+    </form>
+  </div>
 </div>
 
 <!-- 添加/编辑Cookie模态框 -->
-<div id="cookie-modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1000;">
-    <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: white; padding: 30px; border-radius: 8px; width: 500px; max-width: 90%;">
-        <h3 id="modal-title" style="margin-bottom: 20px;">添加Cookie</h3>
-        <form id="cookie-form" onsubmit="saveCookie(event)">
-            <input type="hidden" id="cookie-id" value="">
-            <div class="form-group">
-                <label>名称 *</label>
-                <input type="text" id="cookie-name" required placeholder="例如: 账号1">
-            </div>
-            <div class="form-group">
-                <label>Cookie值 *</label>
-                <input type="text" id="cookie-value" required placeholder="PHPSESSID=xxxxx 或直接输入值">
-            </div>
-            <div class="form-group">
-                <label>备注</label>
-                <textarea id="cookie-remark" placeholder="可选备注信息"></textarea>
-            </div>
-            <div class="flex" style="justify-content: flex-end; gap: 10px;">
-                <button type="button" class="btn" onclick="hideModal()" style="background: #eee;">取消</button>
-                <button type="submit" class="btn btn-primary">保存</button>
-            </div>
-        </form>
-    </div>
+<div id="cookie-modal" class="modal" style="display: none">
+  <div class="modal-content">
+    <h3 id="cookie-modal-title" style="margin-bottom: 20px">添加Cookie</h3>
+    <form id="cookie-form" onsubmit="saveCookie(event)">
+      <input type="hidden" id="cookie-id" value="" />
+      <div class="form-group">
+        <label>名称 *</label>
+        <input
+          type="text"
+          id="cookie-name"
+          required
+          placeholder="例如: 账号1"
+        />
+      </div>
+      <div class="form-group">
+        <label>Cookie值 *</label>
+        <input
+          type="text"
+          id="cookie-value"
+          required
+          placeholder="PHPSESSID=xxxxx 或直接输入值"
+        />
+      </div>
+      <div class="form-group">
+        <label>备注</label>
+        <textarea id="cookie-remark" placeholder="可选备注信息"></textarea>
+      </div>
+      <div class="flex" style="justify-content: flex-end; gap: 10px">
+        <button
+          type="button"
+          class="btn"
+          onclick="hideCookieModal()"
+          style="background: #eee"
+        >
+          取消
+        </button>
+        <button type="submit" class="btn btn-primary">保存</button>
+      </div>
+    </form>
+  </div>
 </div>
-{% endblock %}
 
-{% block scripts %}
+<style>
+  .modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 1000;
+  }
+  .modal-content {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: white;
+    padding: 30px;
+    border-radius: 8px;
+    width: 500px;
+    max-width: 90%;
+  }
+</style>
+{% endblock %} {% block scripts %}
 <script>
-    function showAddModal() {
-        document.getElementById('modal-title').textContent = '添加Cookie';
-        document.getElementById('cookie-id').value = '';
-        document.getElementById('cookie-name').value = '';
-        document.getElementById('cookie-value').value = '';
-        document.getElementById('cookie-remark').value = '';
-        document.getElementById('cookie-modal').style.display = 'block';
+  // ========== 账号管理 ==========
+  function showAddAccountModal() {
+    document.getElementById("account-modal-title").textContent = "添加账号";
+    document.getElementById("account-email").value = "";
+    document.getElementById("account-password").value = "";
+    document.getElementById("account-remark").value = "";
+    document.getElementById("account-modal").style.display = "block";
+  }
+
+  function hideAccountModal() {
+    document.getElementById("account-modal").style.display = "none";
+  }
+
+  async function saveAccount(event) {
+    event.preventDefault();
+
+    const data = {
+      email: document.getElementById("account-email").value,
+      password: document.getElementById("account-password").value,
+      remark: document.getElementById("account-remark").value || null,
+    };
+
+    try {
+      const response = await fetch("/api/accounts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+
+      if (response.ok) {
+        hideAccountModal();
+        alert('账号添加成功！点击"登录"按钮获取Cookie');
+        location.reload();
+      } else {
+        const result = await response.json();
+        alert("保存失败: " + (result.detail || "未知错误"));
+      }
+    } catch (error) {
+      alert("请求失败: " + error.message);
     }
+  }
 
-    function editCookie(id, name, value, remark) {
-        document.getElementById('modal-title').textContent = '编辑Cookie';
-        document.getElementById('cookie-id').value = id;
-        document.getElementById('cookie-name').value = name;
-        document.getElementById('cookie-value').value = value;
-        document.getElementById('cookie-remark').value = remark;
-        document.getElementById('cookie-modal').style.display = 'block';
+  async function loginAccount(id) {
+    if (!confirm("确定要登录此账号获取Cookie吗？")) return;
+
+    try {
+      const btn = event.target;
+      btn.disabled = true;
+      btn.textContent = "登录中...";
+
+      const response = await fetch(`/api/accounts/${id}/login`, {
+        method: "POST",
+      });
+      const result = await response.json();
+
+      if (response.ok) {
+        alert("登录成功！Cookie已添加到Cookie池");
+        location.reload();
+      } else {
+        alert("登录失败: " + (result.detail || "未知错误"));
+        btn.disabled = false;
+        btn.textContent = "登录";
+      }
+    } catch (error) {
+      alert("请求失败: " + error.message);
+      location.reload();
     }
+  }
 
-    function hideModal() {
-        document.getElementById('cookie-modal').style.display = 'none';
+  async function toggleAccount(id) {
+    try {
+      const response = await fetch(`/api/accounts/${id}/toggle`, {
+        method: "POST",
+      });
+      if (response.ok) {
+        location.reload();
+      } else {
+        const result = await response.json();
+        alert("操作失败: " + (result.detail || "未知错误"));
+      }
+    } catch (error) {
+      alert("请求失败: " + error.message);
     }
+  }
 
-    async function saveCookie(event) {
-        event.preventDefault();
+  async function deleteAccount(id, email) {
+    if (
+      !confirm(`确定要删除账号 "${email}" 吗？\n注意：对应的自动Cookie也会失效`)
+    )
+      return;
 
-        const id = document.getElementById('cookie-id').value;
-        const data = {
-            name: document.getElementById('cookie-name').value,
-            cookie_value: document.getElementById('cookie-value').value,
-            remark: document.getElementById('cookie-remark').value || null
-        };
-
-        const url = id ? `/api/cookies/${id}` : '/api/cookies';
-        const method = id ? 'PUT' : 'POST';
-
-        try {
-            const response = await fetch(url, {
-                method: method,
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data)
-            });
-
-            if (response.ok) {
-                hideModal();
-                location.reload();
-            } else {
-                const result = await response.json();
-                alert('保存失败: ' + (result.detail || '未知错误'));
-            }
-        } catch (error) {
-            alert('请求失败: ' + error.message);
-        }
+    try {
+      const response = await fetch(`/api/accounts/${id}`, { method: "DELETE" });
+      if (response.ok) {
+        location.reload();
+      } else {
+        const result = await response.json();
+        alert("删除失败: " + (result.detail || "未知错误"));
+      }
+    } catch (error) {
+      alert("请求失败: " + error.message);
     }
+  }
 
-    async function toggleCookie(id) {
-        try {
-            const response = await fetch(`/api/cookies/${id}/toggle`, { method: 'POST' });
-            if (response.ok) {
-                location.reload();
-            } else {
-                const result = await response.json();
-                alert('操作失败: ' + (result.detail || '未知错误'));
-            }
-        } catch (error) {
-            alert('请求失败: ' + error.message);
-        }
+  async function refreshAllCookies() {
+    if (!confirm("确定要刷新所有账号的Cookie吗？这将重新登录所有活跃账号。"))
+      return;
+
+    try {
+      const btn = event.target;
+      btn.disabled = true;
+      btn.textContent = "刷新中...";
+
+      const response = await fetch("/api/accounts/refresh-all", {
+        method: "POST",
+      });
+      const result = await response.json();
+
+      if (response.ok) {
+        alert(`刷新完成！成功刷新 ${result.refreshed_count} 个Cookie`);
+        location.reload();
+      } else {
+        alert("刷新失败: " + (result.detail || "未知错误"));
+        btn.disabled = false;
+        btn.textContent = "刷新所有Cookie";
+      }
+    } catch (error) {
+      alert("请求失败: " + error.message);
+      location.reload();
     }
+  }
 
-    async function deleteCookie(id, name) {
-        if (!confirm(`确定要删除Cookie "${name}" 吗？`)) return;
+  // ========== Cookie管理 ==========
+  function showAddCookieModal() {
+    document.getElementById("cookie-modal-title").textContent = "添加Cookie";
+    document.getElementById("cookie-id").value = "";
+    document.getElementById("cookie-name").value = "";
+    document.getElementById("cookie-value").value = "";
+    document.getElementById("cookie-remark").value = "";
+    document.getElementById("cookie-modal").style.display = "block";
+  }
 
-        try {
-            const response = await fetch(`/api/cookies/${id}`, { method: 'DELETE' });
-            if (response.ok) {
-                location.reload();
-            } else {
-                const result = await response.json();
-                alert('删除失败: ' + (result.detail || '未知错误'));
-            }
-        } catch (error) {
-            alert('请求失败: ' + error.message);
-        }
+  function editCookie(id, name, value, remark) {
+    document.getElementById("cookie-modal-title").textContent = "编辑Cookie";
+    document.getElementById("cookie-id").value = id;
+    document.getElementById("cookie-name").value = name;
+    document.getElementById("cookie-value").value = value;
+    document.getElementById("cookie-remark").value = remark;
+    document.getElementById("cookie-modal").style.display = "block";
+  }
+
+  function hideCookieModal() {
+    document.getElementById("cookie-modal").style.display = "none";
+  }
+
+  async function saveCookie(event) {
+    event.preventDefault();
+
+    const id = document.getElementById("cookie-id").value;
+    const data = {
+      name: document.getElementById("cookie-name").value,
+      cookie_value: document.getElementById("cookie-value").value,
+      remark: document.getElementById("cookie-remark").value || null,
+    };
+
+    const url = id ? `/api/cookies/${id}` : "/api/cookies";
+    const method = id ? "PUT" : "POST";
+
+    try {
+      const response = await fetch(url, {
+        method: method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+
+      if (response.ok) {
+        hideCookieModal();
+        location.reload();
+      } else {
+        const result = await response.json();
+        alert("保存失败: " + (result.detail || "未知错误"));
+      }
+    } catch (error) {
+      alert("请求失败: " + error.message);
     }
+  }
 
-    // 点击模态框外部关闭
-    document.getElementById('cookie-modal').addEventListener('click', function(e) {
-        if (e.target === this) {
-            hideModal();
-        }
+  async function toggleCookie(id) {
+    try {
+      const response = await fetch(`/api/cookies/${id}/toggle`, {
+        method: "POST",
+      });
+      if (response.ok) {
+        location.reload();
+      } else {
+        const result = await response.json();
+        alert("操作失败: " + (result.detail || "未知错误"));
+      }
+    } catch (error) {
+      alert("请求失败: " + error.message);
+    }
+  }
+
+  async function deleteCookie(id, name) {
+    if (!confirm(`确定要删除Cookie "${name}" 吗？`)) return;
+
+    try {
+      const response = await fetch(`/api/cookies/${id}`, { method: "DELETE" });
+      if (response.ok) {
+        location.reload();
+      } else {
+        const result = await response.json();
+        alert("删除失败: " + (result.detail || "未知错误"));
+      }
+    } catch (error) {
+      alert("请求失败: " + error.message);
+    }
+  }
+
+  // 点击模态框外部关闭
+  document
+    .getElementById("account-modal")
+    .addEventListener("click", function (e) {
+      if (e.target === this) hideAccountModal();
+    });
+  document
+    .getElementById("cookie-modal")
+    .addEventListener("click", function (e) {
+      if (e.target === this) hideCookieModal();
     });
 </script>
 {% endblock %}
