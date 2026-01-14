@@ -1,8 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import func, or_
 from typing import List, Optional
 from pydantic import BaseModel
 from datetime import datetime
+import csv
+import io
 from app.database import get_db
 from app.models.category import Category
 from app.models.journal import Journal
@@ -104,8 +108,6 @@ def list_journals(
     db: Session = Depends(get_db)
 ):
     """获取期刊列表（支持名称/ISSN模糊搜索）"""
-    from sqlalchemy import or_
-
     query = db.query(Journal)
 
     if category_id:
@@ -170,9 +172,10 @@ def get_journal_comments(
 def export_journals(
     category_id: Optional[int] = None,
     format: str = Query("json", pattern="^(json|csv)$"),
+    include_comments: bool = Query(False, description="是否包含评论数据"),
     db: Session = Depends(get_db)
 ):
-    """导出期刊数据"""
+    """导出期刊数据（可选包含评论）"""
     query = db.query(Journal)
     if category_id:
         query = query.filter(Journal.category_id == category_id)
@@ -180,28 +183,92 @@ def export_journals(
     journals = query.all()
 
     if format == "csv":
-        import csv
-        import io
-        from fastapi.responses import StreamingResponse
+        output = io.StringIO()
+        
+        if include_comments:
+            # 导出期刊+评论关联数据
+            writer = csv.writer(output)
+            writer.writerow([
+                "期刊ID", "期刊名称", "ISSN", "E-ISSN", "影响因子", 
+                "JCR分区", "中科院分区", "审稿速度", "录用比例",
+                "评论ID", "评论内容", "评论作者", "评分", "投稿经历", "评论时间"
+            ])
+            for j in journals:
+                comments = db.query(Comment).filter(Comment.journal_id == j.journal_id).all()
+                if comments:
+                    for c in comments:
+                        writer.writerow([
+                            j.journal_id, j.name, j.issn, j.eissn, j.impact_factor,
+                            j.jcr_partition, j.cas_partition, j.review_speed, j.acceptance_rate,
+                            c.comment_id, c.content, c.author, c.rating, c.submit_experience,
+                            c.comment_time.strftime('%Y-%m-%d %H:%M') if c.comment_time else ''
+                        ])
+                else:
+                    # 无评论的期刊也要导出
+                    writer.writerow([
+                        j.journal_id, j.name, j.issn, j.eissn, j.impact_factor,
+                        j.jcr_partition, j.cas_partition, j.review_speed, j.acceptance_rate,
+                        '', '', '', '', '', ''
+                    ])
+            filename = "journals_with_comments.csv"
+        else:
+            # 仅导出期刊数据
+            writer = csv.writer(output)
+            writer.writerow([
+                "ID", "期刊ID", "名称", "ISSN", "E-ISSN",
+                "影响因子", "JCR分区", "中科院分区", "审稿速度", "录用比例"
+            ])
+            for j in journals:
+                writer.writerow([
+                    j.id, j.journal_id, j.name, j.issn, j.eissn,
+                    j.impact_factor, j.jcr_partition, j.cas_partition,
+                    j.review_speed, j.acceptance_rate
+                ])
+            filename = "journals.csv"
 
+        output.seek(0)
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+
+    return [JournalResponse.model_validate(j) for j in journals]
+
+
+@router.get("/export/comments")
+def export_comments(
+    journal_id: Optional[int] = None,
+    format: str = Query("csv", pattern="^(json|csv)$"),
+    db: Session = Depends(get_db)
+):
+    """导出评论数据"""
+    query = db.query(Comment)
+    if journal_id:
+        query = query.filter(Comment.journal_id == journal_id)
+
+    comments = query.all()
+
+    if format == "csv":
         output = io.StringIO()
         writer = csv.writer(output)
         writer.writerow([
-            "ID", "期刊ID", "名称", "ISSN", "E-ISSN",
-            "影响因子", "JCR分区", "中科院分区", "审稿速度", "录用比例"
+            "评论ID", "期刊ID", "评论内容", "作者", "评分", 
+            "投稿经历", "评论时间", "爬取时间"
         ])
-        for j in journals:
+        for c in comments:
             writer.writerow([
-                j.id, j.journal_id, j.name, j.issn, j.eissn,
-                j.impact_factor, j.jcr_partition, j.cas_partition,
-                j.review_speed, j.acceptance_rate
+                c.comment_id, c.journal_id, c.content, c.author, c.rating,
+                c.submit_experience,
+                c.comment_time.strftime('%Y-%m-%d %H:%M') if c.comment_time else '',
+                c.crawled_at.strftime('%Y-%m-%d %H:%M') if c.crawled_at else ''
             ])
 
         output.seek(0)
         return StreamingResponse(
             iter([output.getvalue()]),
             media_type="text/csv",
-            headers={"Content-Disposition": "attachment; filename=journals.csv"}
+            headers={"Content-Disposition": "attachment; filename=comments.csv"}
         )
 
-    return [JournalResponse.model_validate(j) for j in journals]
+    return [CommentResponse.model_validate(c) for c in comments]

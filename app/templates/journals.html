@@ -1,137 +1,229 @@
-{% extends "base.html" %}
-{% block title %}期刊数据 - LetPub爬虫{% endblock %}
+{% extends "base.html" %} {% block title %}期刊数据 - LetPub爬虫{% endblock %}
 {% block content %}
 <div class="card">
-    <div class="flex-between">
-        <h2>期刊列表</h2>
-        <div class="flex">
-            <select id="filter-category" onchange="filterJournals()">
-                <option value="">所有分类</option>
-                {% for cat in categories %}
-                <option value="{{ cat.id }}">{{ cat.name }} ({{ cat.total_count }})</option>
-                {% endfor %}
-            </select>
-            <input type="text" id="search-input" placeholder="搜索期刊名称..." onkeyup="searchJournals(event)">
-            <a href="/api/data/export/journals?format=csv" class="btn btn-success btn-sm">导出CSV</a>
-        </div>
+  <div class="flex-between">
+    <h2>
+      期刊列表 <span id="total-count" class="text-small text-muted"></span>
+    </h2>
+    <div class="flex">
+      <select id="filter-category" onchange="loadJournals(1)">
+        <option value="">所有分类</option>
+        {% for cat in categories %}
+        <option value="{{ cat.id }}">
+          {{ cat.name }} ({{ cat.total_count }})
+        </option>
+        {% endfor %}
+      </select>
+      <input
+        type="text"
+        id="search-input"
+        placeholder="搜索期刊名称/ISSN..."
+        onkeyup="searchJournals(event)"
+      />
+      <button class="btn btn-sm" onclick="loadJournals(1)">搜索</button>
     </div>
-    <table>
-        <thead>
-            <tr>
-                <th>期刊ID</th>
-                <th>名称</th>
-                <th>ISSN</th>
-                <th>影响因子</th>
-                <th>JCR分区</th>
-                <th>中科院分区</th>
-                <th>详情</th>
-                <th>评论</th>
-            </tr>
-        </thead>
-        <tbody id="journals-table">
-            {% for journal in journals %}
-            <tr>
-                <td>{{ journal.journal_id }}</td>
-                <td>
-                    <a href="https://letpub.com.cn/index.php?journalid={{ journal.journal_id }}&page=journalapp&view=detail" target="_blank">
-                        {{ journal.name[:50] }}{% if journal.name|length > 50 %}...{% endif %}
-                    </a>
-                </td>
-                <td>{{ journal.issn or '-' }}</td>
-                <td>{{ journal.impact_factor or '-' }}</td>
-                <td>{{ journal.jcr_partition or '-' }}</td>
-                <td>{{ journal.cas_partition or '-' }}</td>
-                <td>
-                    <span class="status {% if journal.detail_crawled %}status-completed{% else %}status-pending{% endif %}">
-                        {% if journal.detail_crawled %}已爬取{% else %}未爬取{% endif %}
-                    </span>
-                </td>
-                <td>
-                    <span class="status {% if journal.comments_crawled %}status-completed{% else %}status-pending{% endif %}">
-                        {% if journal.comments_crawled %}已爬取{% else %}未爬取{% endif %}
-                    </span>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+  </div>
+
+  <!-- 导出按钮 -->
+  <div class="flex" style="margin-bottom: 15px; gap: 10px">
+    <a
+      id="export-journals-btn"
+      href="/api/data/export/journals?format=csv"
+      class="btn btn-success btn-sm"
+      >导出期刊CSV</a
+    >
+    <a
+      id="export-with-comments-btn"
+      href="/api/data/export/journals?format=csv&include_comments=true"
+      class="btn btn-success btn-sm"
+      >导出期刊+评论CSV</a
+    >
+    <a
+      href="/api/data/export/comments?format=csv"
+      class="btn btn-success btn-sm"
+      >导出全部评论CSV</a
+    >
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>期刊ID</th>
+        <th>名称</th>
+        <th>ISSN</th>
+        <th>影响因子</th>
+        <th>JCR分区</th>
+        <th>中科院分区</th>
+        <th>评论数</th>
+        <th>详情</th>
+      </tr>
+    </thead>
+    <tbody id="journals-table">
+      <!-- 动态加载 -->
+    </tbody>
+  </table>
+
+  <!-- 分页 -->
+  <div class="flex-between" style="margin-top: 15px">
+    <div id="page-info" class="text-small text-muted"></div>
+    <div class="flex" id="pagination">
+      <!-- 动态生成分页按钮 -->
+    </div>
+  </div>
 </div>
 
 <div class="card">
-    <h2>分类统计</h2>
-    <table>
-        <thead>
-            <tr>
-                <th>分类名称</th>
-                <th>分类标识</th>
-                <th>期刊数量</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for cat in categories %}
-            <tr>
-                <td>{{ cat.name }}</td>
-                <td>{{ cat.field_tag }}</td>
-                <td>{{ cat.total_count }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+  <h2>分类统计</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>分类名称</th>
+        <th>分类标识</th>
+        <th>期刊数量</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for cat in categories %}
+      <tr>
+        <td>{{ cat.name }}</td>
+        <td>{{ cat.field_tag }}</td>
+        <td>{{ cat.total_count }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
 </div>
-{% endblock %}
-
-{% block scripts %}
+{% endblock %} {% block scripts %}
 <script>
-    let searchTimeout;
+  let currentPage = 1;
+  let pageSize = 20;
+  let searchTimeout;
 
-    function searchJournals(event) {
-        clearTimeout(searchTimeout);
-        searchTimeout = setTimeout(() => {
-            const search = document.getElementById('search-input').value;
-            const category = document.getElementById('filter-category').value;
-            loadJournals(category, search);
-        }, 500);
+  // 页面加载时获取数据
+  document.addEventListener("DOMContentLoaded", () => loadJournals(1));
+
+  function searchJournals(event) {
+    clearTimeout(searchTimeout);
+    if (event.key === "Enter") {
+      loadJournals(1);
+    } else {
+      searchTimeout = setTimeout(() => loadJournals(1), 500);
     }
+  }
 
-    function filterJournals() {
-        const category = document.getElementById('filter-category').value;
-        const search = document.getElementById('search-input').value;
-        loadJournals(category, search);
-    }
+  async function loadJournals(page) {
+    currentPage = page;
+    const category = document.getElementById("filter-category").value;
+    const search = document.getElementById("search-input").value;
 
-    async function loadJournals(categoryId, search) {
-        let url = '/api/data/journals?size=50';
-        if (categoryId) url += `&category_id=${categoryId}`;
-        if (search) url += `&search=${encodeURIComponent(search)}`;
+    let url = `/api/data/journals?page=${page}&size=${pageSize}`;
+    if (category) url += `&category_id=${category}`;
+    if (search) url += `&search=${encodeURIComponent(search)}`;
 
-        const response = await fetch(url);
-        const journals = await response.json();
+    // 更新导出链接
+    let exportBase = "/api/data/export/journals?format=csv";
+    if (category) exportBase += `&category_id=${category}`;
+    document.getElementById("export-journals-btn").href = exportBase;
+    document.getElementById("export-with-comments-btn").href =
+      exportBase + "&include_comments=true";
 
-        const tbody = document.getElementById('journals-table');
-        tbody.innerHTML = journals.map(j => `
+    const response = await fetch(url);
+    const data = await response.json();
+
+    // 更新总数
+    document.getElementById(
+      "total-count"
+    ).textContent = `(共 ${data.total} 条)`;
+
+    // 更新表格
+    const tbody = document.getElementById("journals-table");
+    tbody.innerHTML = data.items
+      .map(
+        (j) => `
             <tr>
                 <td>${j.journal_id}</td>
                 <td>
-                    <a href="https://letpub.com.cn/index.php?journalid=${j.journal_id}&page=journalapp&view=detail" target="_blank">
-                        ${j.name.substring(0, 50)}${j.name.length > 50 ? '...' : ''}
+                    <a href="https://www.letpub.com.cn/index.php?journalid=${
+                      j.journal_id
+                    }&page=journalapp&view=detail" target="_blank">
+                        ${
+                          j.name.length > 50
+                            ? j.name.substring(0, 50) + "..."
+                            : j.name
+                        }
                     </a>
                 </td>
-                <td>${j.issn || '-'}</td>
-                <td>${j.impact_factor || '-'}</td>
-                <td>${j.jcr_partition || '-'}</td>
-                <td>${j.cas_partition || '-'}</td>
+                <td>${j.issn || "-"}</td>
+                <td>${j.impact_factor || "-"}</td>
+                <td>${
+                  j.jcr_partition ? j.jcr_partition.substring(0, 20) : "-"
+                }</td>
+                <td>${
+                  j.cas_partition ? j.cas_partition.substring(0, 20) : "-"
+                }</td>
                 <td>
-                    <span class="status ${j.detail_crawled ? 'status-completed' : 'status-pending'}">
-                        ${j.detail_crawled ? '已爬取' : '未爬取'}
-                    </span>
+                    <a href="/api/data/journals/${
+                      j.journal_id
+                    }/comments" target="_blank">
+                        ${j.comments_crawled ? "查看" : "-"}
+                    </a>
                 </td>
                 <td>
-                    <span class="status ${j.comments_crawled ? 'status-completed' : 'status-pending'}">
-                        ${j.comments_crawled ? '已爬取' : '未爬取'}
+                    <span class="status ${
+                      j.detail_crawled ? "status-completed" : "status-pending"
+                    }">
+                        ${j.detail_crawled ? "已爬取" : "未爬取"}
                     </span>
                 </td>
             </tr>
-        `).join('');
+        `
+      )
+      .join("");
+
+    // 更新分页
+    updatePagination(data.total, data.page, data.size);
+  }
+
+  function updatePagination(total, page, size) {
+    const totalPages = Math.ceil(total / size);
+    const start = (page - 1) * size + 1;
+    const end = Math.min(page * size, total);
+
+    document.getElementById("page-info").textContent =
+      total > 0 ? `显示 ${start}-${end} 条，共 ${total} 条` : "无数据";
+
+    const pagination = document.getElementById("pagination");
+    let html = "";
+
+    // 上一页
+    if (page > 1) {
+      html += `<button class="btn btn-sm" onclick="loadJournals(${
+        page - 1
+      })">上一页</button>`;
     }
+
+    // 页码
+    const maxButtons = 5;
+    let startPage = Math.max(1, page - Math.floor(maxButtons / 2));
+    let endPage = Math.min(totalPages, startPage + maxButtons - 1);
+    startPage = Math.max(1, endPage - maxButtons + 1);
+
+    for (let i = startPage; i <= endPage; i++) {
+      if (i === page) {
+        html += `<button class="btn btn-primary btn-sm" disabled>${i}</button>`;
+      } else {
+        html += `<button class="btn btn-sm" onclick="loadJournals(${i})">${i}</button>`;
+      }
+    }
+
+    // 下一页
+    if (page < totalPages) {
+      html += `<button class="btn btn-sm" onclick="loadJournals(${
+        page + 1
+      })">下一页</button>`;
+    }
+
+    pagination.innerHTML = html;
+  }
 </script>
 {% endblock %}
