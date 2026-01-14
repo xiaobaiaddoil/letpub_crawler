@@ -1,0 +1,397 @@
+{% extends "base.html" %} {% block title %}期刊评论 - LetPub爬虫{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="flex-between">
+    <div>
+      <h2 id="journal-title">加载中...</h2>
+      <div
+        id="journal-info"
+        class="text-muted text-small"
+        style="margin-top: 5px"
+      ></div>
+    </div>
+    <div class="flex">
+      <a href="/journals" class="btn btn-sm">返回列表</a>
+      <a
+        id="letpub-link"
+        href="#"
+        target="_blank"
+        class="btn btn-primary btn-sm"
+        >查看原页面</a
+      >
+    </div>
+  </div>
+</div>
+
+<!-- 评论统计 -->
+<div class="card">
+  <div class="comment-stats">
+    <div class="stat-item">
+      <div class="stat-value" id="total-comments">-</div>
+      <div class="stat-label">总评论数</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-value" id="avg-rating">-</div>
+      <div class="stat-label">平均评分</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-value" id="latest-comment">-</div>
+      <div class="stat-label">最新评论</div>
+    </div>
+  </div>
+</div>
+
+<!-- 评论列表 -->
+<div class="card">
+  <div class="flex-between" style="margin-bottom: 15px">
+    <h2>评论列表 <span id="page-info" class="text-small text-muted"></span></h2>
+    <div class="flex">
+      <select id="sort-by" onchange="loadComments(1)">
+        <option value="time">按时间排序</option>
+        <option value="rating">按评分排序</option>
+      </select>
+    </div>
+  </div>
+
+  <div id="comments-container">
+    <div class="loading">加载中...</div>
+  </div>
+
+  <!-- 分页 -->
+  <div
+    class="flex"
+    id="pagination"
+    style="justify-content: center; margin-top: 20px"
+  ></div>
+</div>
+{% endblock %} {% block scripts %}
+<style>
+  .comment-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+    text-align: center;
+  }
+  .comment-stats .stat-item {
+    padding: 15px;
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    border-radius: 8px;
+  }
+  .comment-stats .stat-value {
+    font-size: 28px;
+    font-weight: bold;
+    color: #667eea;
+  }
+
+  .comment-card {
+    background: #fff;
+    border: 1px solid #e9ecef;
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 15px;
+    transition: box-shadow 0.3s, transform 0.2s;
+  }
+  .comment-card:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    transform: translateY(-2px);
+  }
+
+  .comment-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 12px;
+  }
+  .comment-author {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .author-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-weight: bold;
+    font-size: 16px;
+  }
+  .author-info {
+    display: flex;
+    flex-direction: column;
+  }
+  .author-name {
+    font-weight: 600;
+    color: #333;
+  }
+  .comment-time {
+    font-size: 12px;
+    color: #999;
+  }
+
+  .comment-rating {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 14px;
+    font-weight: 500;
+  }
+  .rating-high {
+    background: #d4edda;
+    color: #155724;
+  }
+  .rating-medium {
+    background: #fff3cd;
+    color: #856404;
+  }
+  .rating-low {
+    background: #f8d7da;
+    color: #721c24;
+  }
+
+  .comment-content {
+    color: #444;
+    line-height: 1.8;
+    margin-bottom: 12px;
+    padding: 15px;
+    background: #f8f9fa;
+    border-radius: 8px;
+    border-left: 4px solid #667eea;
+  }
+
+  .comment-experience {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    background: #e7f1ff;
+    color: #0056b3;
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  .comment-experience svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .loading {
+    text-align: center;
+    padding: 40px;
+    color: #999;
+  }
+
+  .no-comments {
+    text-align: center;
+    padding: 60px 20px;
+    color: #999;
+  }
+  .no-comments svg {
+    width: 64px;
+    height: 64px;
+    margin-bottom: 15px;
+    opacity: 0.5;
+  }
+</style>
+<script>
+  const journalId = {{ journal_id }};
+  let currentPage = 1;
+  const pageSize = 15;
+  let allComments = [];
+
+  document.addEventListener('DOMContentLoaded', () => {
+      loadJournalInfo();
+      loadAllComments();
+  });
+
+  async function loadJournalInfo() {
+      const response = await fetch(`/api/data/journals/${journalId}`);
+      if (!response.ok) {
+          document.getElementById('journal-title').textContent = '期刊不存在';
+          return;
+      }
+      const journal = await response.json();
+
+      document.getElementById('journal-title').textContent = journal.name;
+      document.getElementById('journal-info').innerHTML = `
+          ISSN: ${journal.issn || '-'} |
+          影响因子: ${journal.impact_factor || '-'} |
+          JCR分区: ${journal.jcr_partition || '-'}
+      `;
+      document.getElementById('letpub-link').href =
+          `https://www.letpub.com.cn/index.php?journalid=${journalId}&page=journalapp&view=detail`;
+  }
+
+  async function loadAllComments() {
+      // 加载所有评论用于统计和排序
+      const response = await fetch(`/api/data/journals/${journalId}/comments?page=1&size=1000`);
+      allComments = await response.json();
+
+      // 更新统计
+      updateStats();
+      // 显示第一页
+      loadComments(1);
+  }
+
+  function updateStats() {
+      document.getElementById('total-comments').textContent = allComments.length;
+
+      // 计算平均评分
+      const ratings = allComments.filter(c => c.rating).map(c => {
+          const match = c.rating.match(/(\d+)/);
+          return match ? parseInt(match[1]) : null;
+      }).filter(r => r !== null);
+
+      if (ratings.length > 0) {
+          const avg = (ratings.reduce((a, b) => a + b, 0) / ratings.length).toFixed(1);
+          document.getElementById('avg-rating').textContent = avg + '分';
+      } else {
+          document.getElementById('avg-rating').textContent = '-';
+      }
+
+      // 最新评论时间 - 找所有评论中最新的 comment_time
+      const validTimes = allComments
+          .filter(c => c.comment_time)
+          .map(c => new Date(c.comment_time))
+          .sort((a, b) => b - a);
+
+      if (validTimes.length > 0) {
+          document.getElementById('latest-comment').textContent =
+              validTimes[0].toLocaleDateString('zh-CN');
+      } else {
+          document.getElementById('latest-comment').textContent = '-';
+      }
+  }
+
+  function loadComments(page) {
+      currentPage = page;
+      const sortBy = document.getElementById('sort-by').value;
+
+      // 排序
+      let sorted = [...allComments];
+      if (sortBy === 'rating') {
+          sorted.sort((a, b) => {
+              const ra = a.rating ? parseInt(a.rating.match(/(\d+)/)?.[1] || 0) : 0;
+              const rb = b.rating ? parseInt(b.rating.match(/(\d+)/)?.[1] || 0) : 0;
+              return rb - ra;
+          });
+      } else {
+          // 按评论时间排序（最新在前）
+          sorted.sort((a, b) => {
+              const ta = a.comment_time ? new Date(a.comment_time).getTime() : 0;
+              const tb = b.comment_time ? new Date(b.comment_time).getTime() : 0;
+              return tb - ta;
+          });
+      }
+
+      // 分页
+      const start = (page - 1) * pageSize;
+      const pageComments = sorted.slice(start, start + pageSize);
+
+      renderComments(pageComments);
+      renderPagination(sorted.length);
+
+      document.getElementById('page-info').textContent =
+          `(${start + 1}-${Math.min(start + pageSize, sorted.length)} / ${sorted.length})`;
+  }
+
+  function renderComments(comments) {
+      const container = document.getElementById('comments-container');
+
+      if (comments.length === 0) {
+          container.innerHTML = `
+              <div class="no-comments">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                  </svg>
+                  <div>暂无评论数据</div>
+              </div>
+          `;
+          return;
+      }
+
+      container.innerHTML = comments.map(c => {
+          const authorInitial = (c.author || '匿名')[0].toUpperCase();
+          const ratingClass = getRatingClass(c.rating);
+          const timeStr = c.comment_time ?
+              new Date(c.comment_time).toLocaleDateString('zh-CN', {
+                  year: 'numeric', month: 'long', day: 'numeric'
+              }) : '未知时间';
+
+          return `
+              <div class="comment-card">
+                  <div class="comment-header">
+                      <div class="comment-author">
+                          <div class="author-avatar">${authorInitial}</div>
+                          <div class="author-info">
+                              <span class="author-name">${c.author || '匿名用户'}</span>
+                              <span class="comment-time">${timeStr}</span>
+                          </div>
+                      </div>
+                      ${c.rating ? `<div class="comment-rating ${ratingClass}">${c.rating}</div>` : ''}
+                  </div>
+                  <div class="comment-content">${c.content || '无评论内容'}</div>
+                  ${c.submit_experience ? `
+                      <div class="comment-experience">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                              <polyline points="14 2 14 8 20 8"></polyline>
+                          </svg>
+                          投稿经历: ${c.submit_experience}
+                      </div>
+                  ` : ''}
+              </div>
+          `;
+      }).join('');
+  }
+
+  function getRatingClass(rating) {
+      if (!rating) return '';
+      const match = rating.match(/(\d+)/);
+      if (!match) return 'rating-medium';
+      const score = parseInt(match[1]);
+      if (score >= 4) return 'rating-high';
+      if (score >= 2) return 'rating-medium';
+      return 'rating-low';
+  }
+
+  function renderPagination(total) {
+      const totalPages = Math.ceil(total / pageSize);
+      const pagination = document.getElementById('pagination');
+
+      if (totalPages <= 1) {
+          pagination.innerHTML = '';
+          return;
+      }
+
+      let html = '';
+
+      if (currentPage > 1) {
+          html += `<button class="btn btn-sm" onclick="loadComments(${currentPage - 1})">上一页</button>`;
+      }
+
+      const maxButtons = 5;
+      let startPage = Math.max(1, currentPage - Math.floor(maxButtons / 2));
+      let endPage = Math.min(totalPages, startPage + maxButtons - 1);
+      startPage = Math.max(1, endPage - maxButtons + 1);
+
+      for (let i = startPage; i <= endPage; i++) {
+          if (i === currentPage) {
+              html += `<button class="btn btn-primary btn-sm" disabled>${i}</button>`;
+          } else {
+              html += `<button class="btn btn-sm" onclick="loadComments(${i})">${i}</button>`;
+          }
+      }
+
+      if (currentPage < totalPages) {
+          html += `<button class="btn btn-sm" onclick="loadComments(${currentPage + 1})">下一页</button>`;
+      }
+
+      pagination.innerHTML = html;
+  }
+</script>
+{% endblock %}

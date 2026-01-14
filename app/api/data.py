@@ -155,7 +155,7 @@ def get_journal(journal_id: int, db: Session = Depends(get_db)):
 def get_journal_comments(
     journal_id: int,
     page: int = Query(1, ge=1),
-    size: int = Query(20, ge=1, le=100),
+    size: int = Query(20, ge=1, le=1000),
     db: Session = Depends(get_db)
 ):
     """获取期刊评论"""
@@ -164,8 +164,9 @@ def get_journal_comments(
         raise HTTPException(status_code=404, detail="期刊不存在")
 
     offset = (page - 1) * size
+    # Comment.journal_id 存储的是期刊的 journal_id，不是主键 id
     return db.query(Comment).filter(
-        Comment.journal_id == journal.id
+        Comment.journal_id == journal_id
     ).order_by(Comment.crawled_at.desc()).offset(offset).limit(size).all()
 
 @router.get("/export/journals")
@@ -175,7 +176,12 @@ def export_journals(
     include_comments: bool = Query(False, description="是否包含评论数据"),
     db: Session = Depends(get_db)
 ):
-    """导出期刊数据（可选包含评论）"""
+    """导出期刊数据（可选包含评论）
+    
+    评论数据以 JSON 列表形式放在期刊的一列中
+    """
+    import json as json_lib
+    
     query = db.query(Journal)
     if category_id:
         query = query.filter(Journal.category_id == category_id)
@@ -183,37 +189,42 @@ def export_journals(
     journals = query.all()
 
     if format == "csv":
-        output = io.StringIO()
+        # 使用 BytesIO 并添加 UTF-8 BOM 解决乱码问题
+        output = io.BytesIO()
+        output.write(b'\xef\xbb\xbf')  # UTF-8 BOM
+        
+        text_output = io.StringIO()
+        writer = csv.writer(text_output)
         
         if include_comments:
-            # 导出期刊+评论关联数据
-            writer = csv.writer(output)
+            # 导出期刊数据，评论作为 JSON 列表放在一列
             writer.writerow([
                 "期刊ID", "期刊名称", "ISSN", "E-ISSN", "影响因子", 
-                "JCR分区", "中科院分区", "审稿速度", "录用比例",
-                "评论ID", "评论内容", "评论作者", "评分", "投稿经历", "评论时间"
+                "JCR分区", "中科院分区", "审稿速度", "录用比例", "评论数量", "评论数据"
             ])
             for j in journals:
                 comments = db.query(Comment).filter(Comment.journal_id == j.journal_id).all()
-                if comments:
-                    for c in comments:
-                        writer.writerow([
-                            j.journal_id, j.name, j.issn, j.eissn, j.impact_factor,
-                            j.jcr_partition, j.cas_partition, j.review_speed, j.acceptance_rate,
-                            c.comment_id, c.content, c.author, c.rating, c.submit_experience,
-                            c.comment_time.strftime('%Y-%m-%d %H:%M') if c.comment_time else ''
-                        ])
-                else:
-                    # 无评论的期刊也要导出
-                    writer.writerow([
-                        j.journal_id, j.name, j.issn, j.eissn, j.impact_factor,
-                        j.jcr_partition, j.cas_partition, j.review_speed, j.acceptance_rate,
-                        '', '', '', '', '', ''
-                    ])
+                # 将评论转为 JSON 列表
+                comments_list = []
+                for c in comments:
+                    comments_list.append({
+                        "comment_id": c.comment_id,
+                        "content": c.content,
+                        "author": c.author,
+                        "rating": c.rating,
+                        "submit_experience": c.submit_experience,
+                        "comment_time": c.comment_time.strftime('%Y-%m-%d %H:%M') if c.comment_time else None
+                    })
+                
+                writer.writerow([
+                    j.journal_id, j.name, j.issn, j.eissn, j.impact_factor,
+                    j.jcr_partition, j.cas_partition, j.review_speed, j.acceptance_rate,
+                    len(comments_list),
+                    json_lib.dumps(comments_list, ensure_ascii=False) if comments_list else ''
+                ])
             filename = "journals_with_comments.csv"
         else:
             # 仅导出期刊数据
-            writer = csv.writer(output)
             writer.writerow([
                 "ID", "期刊ID", "名称", "ISSN", "E-ISSN",
                 "影响因子", "JCR分区", "中科院分区", "审稿速度", "录用比例"
@@ -226,10 +237,13 @@ def export_journals(
                 ])
             filename = "journals.csv"
 
+        # 写入 BytesIO
+        output.write(text_output.getvalue().encode('utf-8'))
         output.seek(0)
+        
         return StreamingResponse(
             iter([output.getvalue()]),
-            media_type="text/csv",
+            media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": f"attachment; filename={filename}"}
         )
 
@@ -250,8 +264,12 @@ def export_comments(
     comments = query.all()
 
     if format == "csv":
-        output = io.StringIO()
-        writer = csv.writer(output)
+        # 使用 BytesIO 并添加 UTF-8 BOM
+        output = io.BytesIO()
+        output.write(b'\xef\xbb\xbf')  # UTF-8 BOM
+        
+        text_output = io.StringIO()
+        writer = csv.writer(text_output)
         writer.writerow([
             "评论ID", "期刊ID", "评论内容", "作者", "评分", 
             "投稿经历", "评论时间", "爬取时间"
@@ -264,10 +282,12 @@ def export_comments(
                 c.crawled_at.strftime('%Y-%m-%d %H:%M') if c.crawled_at else ''
             ])
 
+        output.write(text_output.getvalue().encode('utf-8'))
         output.seek(0)
+        
         return StreamingResponse(
             iter([output.getvalue()]),
-            media_type="text/csv",
+            media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": "attachment; filename=comments.csv"}
         )
 

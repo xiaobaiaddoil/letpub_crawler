@@ -263,8 +263,9 @@ def check_incremental_updates(db: Session = Depends(get_db)):
     """检测需要增量更新的期刊
     
     检测条件：
-    1. 评论数量不匹配（数据库评论数 < 详情页显示的评论数）
-    2. 爬取时间超过3个月
+    1. 缺少评论数量信息（detail_data 中没有 comment_count）
+    2. 评论数量不匹配（数据库评论数 < 详情页显示的评论数）
+    3. 爬取时间超过3个月
     """
     now = datetime.now(timezone.utc)
     three_months_ago = now - timedelta(days=90)
@@ -272,6 +273,7 @@ def check_incremental_updates(db: Session = Depends(get_db)):
     # 获取所有已爬取详情的期刊
     journals = db.query(Journal).filter(Journal.detail_crawled == True).all()
     
+    missing_info = []  # 缺少评论数量信息
     comment_mismatch = []  # 评论数量不匹配
     outdated = []  # 超过3个月
     
@@ -283,11 +285,21 @@ def check_incremental_updates(db: Session = Depends(get_db)):
         
         # 从 detail_data 获取页面显示的评论数（如果有）
         page_comment_count = None
+        has_comment_info = False
         if journal.detail_data:
             page_comment_count = journal.detail_data.get("comment_count")
+            has_comment_info = page_comment_count is not None
         
+        # 检查是否缺少评论数量信息
+        if not has_comment_info:
+            missing_info.append({
+                "journal_id": journal.journal_id,
+                "name": journal.name,
+                "db_count": db_comment_count,
+                "reason": "缺少comment_count信息"
+            })
         # 检查评论数量是否匹配
-        if page_comment_count is not None and db_comment_count < page_comment_count:
+        elif db_comment_count < page_comment_count:
             comment_mismatch.append({
                 "journal_id": journal.journal_id,
                 "name": journal.name,
@@ -310,9 +322,13 @@ def check_incremental_updates(db: Session = Depends(get_db)):
                 })
     
     return {
+        "missing_info": {
+            "count": len(missing_info),
+            "items": missing_info[:50]
+        },
         "comment_mismatch": {
             "count": len(comment_mismatch),
-            "items": comment_mismatch[:50]  # 限制返回数量
+            "items": comment_mismatch[:50]
         },
         "outdated": {
             "count": len(outdated),
@@ -378,6 +394,54 @@ def create_comment_update_tasks(
     return {"message": f"已创建 {created} 个评论更新任务"}
 
 
+@router.post("/incremental-update/missing-info")
+def create_missing_info_update_tasks(db: Session = Depends(get_db)):
+    """为缺少评论数量信息的期刊创建更新任务
+    
+    这些期刊的 detail_data 中没有 comment_count 字段，需要重新爬取
+    """
+    # 查找缺少 comment_count 信息的期刊
+    journals = db.query(Journal).filter(Journal.detail_crawled == True).all()
+    journal_ids = []
+    
+    for journal in journals:
+        has_comment_info = False
+        if journal.detail_data:
+            has_comment_info = journal.detail_data.get("comment_count") is not None
+        
+        if not has_comment_info:
+            journal_ids.append(journal.journal_id)
+    
+    # 创建任务
+    created = 0
+    for jid in journal_ids:
+        journal = db.query(Journal).filter(Journal.journal_id == jid).first()
+        if journal:
+            # 重置爬取状态
+            journal.detail_crawled = False
+            journal.comments_crawled = False
+            
+            # 重置任务
+            task = db.query(CrawlTask).filter(
+                CrawlTask.task_type == TaskType.DETAIL.value,
+                CrawlTask.target_id == str(jid)
+            ).first()
+            
+            if task:
+                task.status = TaskStatus.PENDING.value
+                task.retry_count = 0
+                task.error_message = None
+                task.worker_id = None
+                task.locked_at = None
+                task.started_at = None
+                task.completed_at = None
+            
+            created += 1
+    
+    db.commit()
+    return {"message": f"已创建 {created} 个缺失信息更新任务", "journal_count": len(journal_ids)}
+
+
 @router.post("/incremental-update/outdated")
 def create_outdated_update_tasks(
     days: int = Query(90, ge=1, description="超过多少天视为过期"),
@@ -418,3 +482,78 @@ def create_outdated_update_tasks(
     
     db.commit()
     return {"message": f"已创建 {created} 个过期期刊更新任务", "threshold_days": days}
+
+
+@router.post("/reset-by-journal")
+def reset_tasks_by_journal(
+    journal_ids: List[int],
+    db: Session = Depends(get_db)
+):
+    """根据期刊ID数组重置任务
+    
+    重置指定期刊的详情任务为待处理状态，同时重置期刊的爬取状态
+    """
+    reset_count = 0
+    
+    for jid in journal_ids:
+        # 重置期刊爬取状态
+        journal = db.query(Journal).filter(Journal.journal_id == jid).first()
+        if journal:
+            journal.detail_crawled = False
+            journal.comments_crawled = False
+        
+        # 重置任务
+        task = db.query(CrawlTask).filter(
+            CrawlTask.task_type == TaskType.DETAIL.value,
+            CrawlTask.target_id == str(jid)
+        ).first()
+        
+        if task:
+            task.status = TaskStatus.PENDING.value
+            task.retry_count = 0
+            task.error_message = None
+            task.worker_id = None
+            task.locked_at = None
+            task.started_at = None
+            task.completed_at = None
+            reset_count += 1
+    
+    db.commit()
+    return {"message": f"已重置 {reset_count} 个任务", "requested": len(journal_ids)}
+
+
+@router.post("/reset-by-journal/{journal_id}")
+def reset_task_by_single_journal(
+    journal_id: int,
+    db: Session = Depends(get_db)
+):
+    """根据单个期刊ID重置任务"""
+    # 重置期刊爬取状态
+    journal = db.query(Journal).filter(Journal.journal_id == journal_id).first()
+    if not journal:
+        raise HTTPException(status_code=404, detail="期刊不存在")
+    
+    journal.detail_crawled = False
+    journal.comments_crawled = False
+    
+    # 重置任务
+    task = db.query(CrawlTask).filter(
+        CrawlTask.task_type == TaskType.DETAIL.value,
+        CrawlTask.target_id == str(journal_id)
+    ).first()
+    
+    if task:
+        task.status = TaskStatus.PENDING.value
+        task.retry_count = 0
+        task.error_message = None
+        task.worker_id = None
+        task.locked_at = None
+        task.started_at = None
+        task.completed_at = None
+        db.commit()
+        return {"message": f"期刊 {journal_id} 任务已重置"}
+    else:
+        # 任务不存在，创建新任务
+        task_manager = TaskManager(db)
+        task_manager.create_detail_task(journal_id, journal.category_id)
+        return {"message": f"期刊 {journal_id} 任务已创建"}

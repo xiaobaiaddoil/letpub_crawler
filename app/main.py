@@ -428,6 +428,25 @@ async def proxies_page(request: Request):
     """代理池管理页面"""
     return templates.TemplateResponse("proxies.html", {"request": request})
 
+
+@app.get("/journals/{journal_id}/comments", response_class=HTMLResponse)
+async def journal_comments_page(request: Request, journal_id: int, db: Session = Depends(get_db)):
+    """期刊评论页面"""
+    from app.models.journal import Journal
+    
+    journal = db.query(Journal).filter(Journal.journal_id == journal_id).first()
+    if not journal:
+        return templates.TemplateResponse("comments.html", {
+            "request": request,
+            "journal_id": journal_id,
+            "error": "期刊不存在"
+        })
+    
+    return templates.TemplateResponse("comments.html", {
+        "request": request,
+        "journal_id": journal_id
+    })
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host=config.HOST, port=config.PORT)

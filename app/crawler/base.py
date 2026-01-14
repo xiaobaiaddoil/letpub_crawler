@@ -98,13 +98,14 @@ class BaseCrawler(ABC):
                 server = f"{proxy_info.get('protocol', 'http')}://{proxy_info['ip']}:{proxy_info['port']}"
                 proxy_config = {"server": server}
                 
-                # 如果有用户名密码（隧道代理），添加认证
+                # 如果有用户名密码，添加认证
                 if proxy_info.get("username") and proxy_info.get("password"):
                     proxy_config["username"] = proxy_info["username"]
                     proxy_config["password"] = proxy_info["password"]
-                    logger.info(f"[代理] 使用隧道代理: {proxy_info['ip']}:{proxy_info['port']} (带认证)")
+                    logger.info(f"[代理] 使用代理(密码认证): {proxy_info['ip']}:{proxy_info['port']}")
                 else:
-                    logger.info(f"[代理] 使用私密代理: {proxy_info['ip']}:{proxy_info['port']}")
+                    # 白名单模式
+                    logger.info(f"[代理] 使用代理(白名单): {proxy_info['ip']}:{proxy_info['port']}")
             else:
                 # 无可用代理，使用直连
                 self._using_direct = True

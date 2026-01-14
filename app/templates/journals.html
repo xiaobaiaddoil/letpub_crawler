@@ -162,9 +162,7 @@
                   j.cas_partition ? j.cas_partition.substring(0, 20) : "-"
                 }</td>
                 <td>
-                    <a href="/api/data/journals/${
-                      j.journal_id
-                    }/comments" target="_blank">
+                    <a href="/journals/${j.journal_id}/comments">
                         ${j.comments_crawled ? "查看" : "-"}
                     </a>
                 </td>

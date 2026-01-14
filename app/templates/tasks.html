@@ -28,6 +28,18 @@
     </div>
 </div>
 
+<!-- 按期刊ID重置任务 -->
+<div class="card">
+    <h2>按期刊ID重置任务</h2>
+    <div class="flex" style="gap: 10px; align-items: flex-end;">
+        <div style="flex: 1;">
+            <label class="text-small text-muted">输入期刊ID（多个用逗号分隔）</label>
+            <input type="text" id="reset-journal-ids" placeholder="例如: 123, 456, 789" style="width: 100%;">
+        </div>
+        <button class="btn btn-warning" onclick="resetByJournalIds()">重置任务</button>
+    </div>
+</div>
+
 <!-- 增量更新检测 -->
 <div class="card">
     <div class="flex-between">
@@ -40,6 +52,11 @@
                 <h4>评论数量不匹配 <span id="mismatch-count" class="text-muted"></span></h4>
                 <div id="mismatch-list" class="text-small" style="max-height: 200px; overflow-y: auto;"></div>
                 <button class="btn btn-warning btn-sm" style="margin-top: 10px;" onclick="createCommentUpdateTasks()">创建评论更新任务</button>
+            </div>
+            <div style="flex: 1;">
+                <h4>缺少评论信息 <span id="missing-count" class="text-muted"></span></h4>
+                <div id="missing-list" class="text-small" style="max-height: 200px; overflow-y: auto;"></div>
+                <button class="btn btn-warning btn-sm" style="margin-top: 10px;" onclick="createMissingInfoTasks()">创建补全任务</button>
             </div>
             <div style="flex: 1;">
                 <h4>超过3个月未更新 <span id="outdated-count" class="text-muted"></span></h4>
@@ -265,6 +282,16 @@
             document.getElementById('mismatch-list').innerHTML = '<div class="text-muted">无</div>';
         }
         
+        // 缺少信息
+        document.getElementById('missing-count').textContent = `(${data.missing_info.count} 个)`;
+        if (data.missing_info.items.length > 0) {
+            document.getElementById('missing-list').innerHTML = data.missing_info.items.map(j => 
+                `<div>${j.journal_id}: ${j.name.substring(0, 30)} (已有${j.db_count}条评论)</div>`
+            ).join('');
+        } else {
+            document.getElementById('missing-list').innerHTML = '<div class="text-muted">无</div>';
+        }
+        
         // 过期
         document.getElementById('outdated-count').textContent = `(${data.outdated.count} 个)`;
         if (data.outdated.items.length > 0) {
@@ -279,6 +306,15 @@
     async function createCommentUpdateTasks() {
         if (!confirm('确定要为评论数量不匹配的期刊创建更新任务吗？')) return;
         const result = await apiCall('/api/tasks/incremental-update/comments');
+        if (result) {
+            alert(result.message);
+            loadStats();
+        }
+    }
+
+    async function createMissingInfoTasks() {
+        if (!confirm('确定要为缺少评论信息的期刊创建补全任务吗？')) return;
+        const result = await apiCall('/api/tasks/incremental-update/missing-info');
         if (result) {
             alert(result.message);
             loadStats();
@@ -330,6 +366,43 @@
 
     function showError(message) {
         alert('错误信息:\n\n' + message);
+    }
+
+    async function resetByJournalIds() {
+        const input = document.getElementById('reset-journal-ids').value.trim();
+        if (!input) {
+            alert('请输入期刊ID');
+            return;
+        }
+        
+        // 解析逗号分隔的ID
+        const ids = input.split(',')
+            .map(s => s.trim())
+            .filter(s => s)
+            .map(s => parseInt(s))
+            .filter(n => !isNaN(n));
+        
+        if (ids.length === 0) {
+            alert('请输入有效的期刊ID');
+            return;
+        }
+        
+        if (!confirm(`确定要重置 ${ids.length} 个期刊的任务吗？`)) return;
+        
+        const response = await fetch('/api/tasks/reset-by-journal', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(ids)
+        });
+        const result = await response.json();
+        
+        if (response.ok) {
+            alert(result.message);
+            document.getElementById('reset-journal-ids').value = '';
+            loadStats();
+        } else {
+            alert('操作失败: ' + (result.detail || result.message));
+        }
     }
 
     // 每30秒刷新统计
