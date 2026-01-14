@@ -535,8 +535,10 @@ class DetailCrawler(BaseCrawler):
         """通过AJAX API获取评论数据（更高效的方式）
 
         使用浏览器初始化时获取的 Cookie（来自 Cookie 池或本地配置）
+        当检测到每页只有1条评论时，主动更换Cookie重试
         """
         comments = []
+        cookie_refresh_attempted = False  # 标记是否已尝试刷新Cookie
 
         try:
             comment_ele = self.page.locator("xpath=//td/h2/font")
@@ -610,6 +612,27 @@ class DetailCrawler(BaseCrawler):
                             continue
 
                     logger.info(f"第 {page} 页: API返回 {len(comment_data)} 条, 有效 {len(page_comments)} 条")
+
+                    # 检测Cookie失效：多页但每页只有1条数据
+                    if len(page_comments) == 1 and max_pages > 1 and page == 1 and not cookie_refresh_attempted:
+                        logger.warning(f"[Cookie] 检测到异常：多页({max_pages}页)但第1页只有1条数据，Cookie可能失效")
+                        
+                        # 报告当前Cookie失败
+                        await self.report_cookie_result(success=False)
+                        
+                        # 尝试获取新Cookie
+                        new_cookie = await self._get_cookie_from_pool()
+                        if new_cookie:
+                            logger.info(f"[Cookie] 已获取新Cookie，重新开始获取评论")
+                            cookie_value = new_cookie
+                            cookie_refresh_attempted = True
+                            # 清空已获取的评论，重新开始
+                            comments.clear()
+                            page = 1
+                            continue
+                        else:
+                            logger.warning("[Cookie] 无法获取新Cookie，继续使用当前Cookie")
+                            cookie_refresh_attempted = True
 
                     # 检查是否还有更多评论
                     total_count = data.get("count", 0)
