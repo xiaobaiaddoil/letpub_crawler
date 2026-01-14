@@ -3,13 +3,30 @@ import logging
 import json
 import math
 import httpx
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 import uuid
 import lxml.etree
 from app.crawler.base import BaseCrawler
 from app.config import config
 
 logger = logging.getLogger(__name__)
+
+# 问题记录回调（由 worker 设置）
+_problem_recorder = None
+
+def set_problem_recorder(recorder):
+    """设置问题记录器（由 worker 调用）"""
+    global _problem_recorder
+    _problem_recorder = recorder
+
+def record_problem(journal_id: int, problem_type: str, problem_code: str, 
+                   message: str = None, expected: int = None, actual: int = None):
+    """记录问题（如果设置了记录器）"""
+    if _problem_recorder:
+        try:
+            _problem_recorder(journal_id, problem_type, problem_code, message, expected, actual)
+        except Exception as e:
+            logger.warning(f"记录问题失败: {e}")
 
 
 class DataValidationError(Exception):
@@ -681,16 +698,30 @@ class DetailCrawler(BaseCrawler):
             # 例如：3页至少要有 20+ 条评论（最后一页可能不满10条）
             min_expected = (total_pages - 1) * page_size if total_pages > 1 else 0
             if len(comments) < min_expected and total_pages > 1:
-                logger.warning(
-                    f"[评论] 期刊 {journal_id} 评论数量异常: "
-                    f"页面显示 {total_comments} 条/{total_pages} 页, "
-                    f"实际爬取 {len(comments)} 条 (期望至少 {min_expected} 条)"
+                msg = (f"页面显示 {total_comments} 条/{total_pages} 页, "
+                       f"实际爬取 {len(comments)} 条 (期望至少 {min_expected} 条)")
+                logger.warning(f"[评论] 期刊 {journal_id} 评论数量异常: {msg}")
+                # 记录问题
+                record_problem(
+                    journal_id=journal_id,
+                    problem_type="warning",
+                    problem_code="comment_mismatch",
+                    message=msg,
+                    expected=total_comments,
+                    actual=len(comments)
                 )
             
             logger.info(f"通过API共获取 {len(comments)} 条评论 (页面显示: {total_comments} 条)")
 
         except Exception as e:
             logger.error(f"API获取评论失败: {e}")
+            # 记录错误
+            record_problem(
+                journal_id=journal_id,
+                problem_type="error",
+                problem_code="comment_fetch_error",
+                message=str(e)
+            )
             # 降级使用页面爬取
             logger.info("降级使用页面爬取方式")
             fallback_comments = await self._extract_comments()

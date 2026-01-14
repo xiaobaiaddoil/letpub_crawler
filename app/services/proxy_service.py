@@ -187,9 +187,16 @@ class ProxyService:
         self.db.commit()
         return proxy
     
-    def add_tunnel_proxy(self, tunnel: str, username: str, password: str, 
+    def add_tunnel_proxy(self, tunnel: str, username: str = None, password: str = None, 
                          remark: str = None) -> ProxyPool:
-        """添加隧道代理（固定地址）"""
+        """添加隧道代理（固定地址）
+        
+        Args:
+            tunnel: 隧道地址 host:port
+            username: 用户名（白名单模式可为空）
+            password: 密码（白名单模式可为空）
+            remark: 备注
+        """
         if ":" in tunnel:
             host, port = tunnel.rsplit(":", 1)
             port = int(port)
@@ -204,7 +211,7 @@ class ProxyService:
             proxy_type="tunnel",
             username=username,
             password=password,
-            remark=remark or "快代理隧道"
+            remark=remark or "隧道代理"
         )
     
     async def fetch_private_proxies(self, api_url: str, username: str, password: str,
@@ -597,9 +604,9 @@ class ProxyService:
         """直接从 proxy.yaml 配置文件获取代理（不依赖数据库配置）
         
         Returns:
-            {"tunnel": 隧道代理数, "private": 私密代理数}
+            {"tunnel": 隧道代理数, "overseas_tunnel": 海外隧道数, "private": 私密代理数}
         """
-        result = {"tunnel": 0, "private": 0}
+        result = {"tunnel": 0, "overseas_tunnel": 0, "private": 0}
         proxy_cfg = config.proxy_config
         
         if not proxy_cfg:
@@ -610,16 +617,32 @@ class ProxyService:
         tunnel_cfg = proxy_cfg.get("tunnel") or {}
         if tunnel_cfg.get("enabled"):
             addr = tunnel_cfg.get("addr")
-            username = tunnel_cfg.get("username")
-            password = tunnel_cfg.get("password")
-            
-            if addr and username and password:
+            if addr:
                 try:
+                    username = tunnel_cfg.get("username")
+                    password = tunnel_cfg.get("password")
+                    # 有用户名密码则使用密码认证，否则白名单模式
                     self.add_tunnel_proxy(addr, username, password, "yaml_tunnel")
                     result["tunnel"] = 1
-                    logger.info(f"[代理] 隧道代理已添加: {addr}")
+                    mode = "密码认证" if (username and password) else "白名单"
+                    logger.info(f"[代理] 隧道代理已添加({mode}): {addr}")
                 except Exception as e:
                     logger.error(f"[代理] 添加隧道代理失败: {e}")
+        
+        # 获取海外隧道代理
+        overseas_cfg = proxy_cfg.get("overseas_tunnel") or {}
+        if overseas_cfg.get("enabled"):
+            addr = overseas_cfg.get("addr")
+            if addr:
+                try:
+                    username = overseas_cfg.get("username")
+                    password = overseas_cfg.get("password")
+                    self.add_tunnel_proxy(addr, username, password, "yaml_overseas")
+                    result["overseas_tunnel"] = 1
+                    mode = "密码认证" if (username and password) else "白名单"
+                    logger.info(f"[代理] 海外隧道代理已添加({mode}): {addr}")
+                except Exception as e:
+                    logger.error(f"[代理] 添加海外隧道代理失败: {e}")
         
         # 获取私密代理
         private_cfg = proxy_cfg.get("private") or {}

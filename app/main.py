@@ -11,7 +11,7 @@ from pathlib import Path
 
 from app.config import config
 from app.database import init_db, get_db, SessionLocal
-from app.api import tasks, data, workers, cookies, accounts, proxies
+from app.api import tasks, data, workers, cookies, accounts, proxies, problems
 from app.services.crawler_service import crawler_service
 from app.services.task_manager import TaskManager
 from app.logging_config import setup_app_logging, clean_old_logs
@@ -210,6 +210,7 @@ app.include_router(workers.router)
 app.include_router(cookies.router)
 app.include_router(accounts.router)
 app.include_router(proxies.router)
+app.include_router(problems.router)
 
 # 爬虫控制API
 @app.post("/api/crawler/start")

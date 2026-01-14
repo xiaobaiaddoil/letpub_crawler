@@ -32,6 +32,7 @@ from app.logging_config import setup_app_logging, clean_old_logs
 from app.models.worker import Worker, WorkerStatus
 from app.models.task import CrawlTask, TaskType, TaskStatus
 from app.services.task_manager import TaskManager, generate_worker_id
+from app.services.problem_service import ProblemService
 
 # 初始化日志
 setup_app_logging(debug=config.DEBUG, console_level=config.CONSOLE_LOG_LEVEL)
@@ -94,6 +95,31 @@ class DistributedWorker:
             return ip
         except Exception:
             return "127.0.0.1"
+
+    def _setup_problem_recorder(self):
+        """设置问题记录器"""
+        from app.crawler.detail_crawler import set_problem_recorder
+        
+        def recorder(journal_id, problem_type, problem_code, message, expected, actual):
+            """问题记录回调"""
+            db = SessionLocal()
+            try:
+                service = ProblemService(db)
+                service.record_problem(
+                    journal_id=journal_id,
+                    problem_type=problem_type,
+                    problem_code=problem_code,
+                    message=message,
+                    expected_value=expected,
+                    actual_value=actual
+                )
+            except Exception as e:
+                logger.warning(f"记录问题失败: {e}")
+            finally:
+                db.close()
+        
+        set_problem_recorder(recorder)
+        logger.info("问题记录器已设置")
 
     async def _save_failed_html(self, crawler, task_id: str, error: str):
         """保存失败任务的HTML内容"""
@@ -565,6 +591,9 @@ class DistributedWorker:
         except Exception as e:
             logger.error(f"数据库连接失败: {e}")
             return
+
+        # 设置问题记录器
+        self._setup_problem_recorder()
 
         # 注册Worker
         await self.register()
