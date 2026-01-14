@@ -72,7 +72,13 @@ class DetailCrawler(BaseCrawler):
             self._validate_basic_info(detail["basic_info"], journal_id)
 
         # 通过API提取评论（更高效）
-        detail["comments"] = await self._fetch_comments_from_api(journal_id)
+        comments, comment_info = await self._fetch_comments_from_api(journal_id)
+        detail["comments"] = comments
+        
+        # 将评论数量信息存入 basic_info
+        detail["basic_info"]["comment_count"] = comment_info.get("total_count", 0)
+        detail["basic_info"]["comment_pages"] = comment_info.get("total_pages", 0)
+        detail["basic_info"]["crawled_comment_count"] = comment_info.get("crawled_count", 0)
 
         return detail
 
@@ -531,27 +537,43 @@ class DetailCrawler(BaseCrawler):
 
         return normalized
 
-    async def _fetch_comments_from_api(self, journal_id: int) -> List[Dict]:
+    async def _fetch_comments_from_api(self, journal_id: int) -> tuple:
         """通过AJAX API获取评论数据（更高效的方式）
 
         使用浏览器初始化时获取的 Cookie（来自 Cookie 池或本地配置）
         当检测到每页只有1条评论时，主动更换Cookie重试
+        
+        Returns:
+            tuple: (comments列表, comment_info字典)
+            comment_info包含: total_count(总评论数), total_pages(总页数), crawled_count(爬取数量)
         """
         comments = []
         cookie_refresh_attempted = False  # 标记是否已尝试刷新Cookie
+        
+        # 评论信息
+        comment_info = {
+            "total_count": 0,
+            "total_pages": 0,
+            "crawled_count": 0
+        }
 
         try:
             comment_ele = self.page.locator("xpath=//td/h2/font")
             comment_nums = await comment_ele.inner_text()
-            page_nums = 10
-            pages = int(comment_nums)
-            page_nums = math.ceil(pages / page_nums)
+            total_comments = int(comment_nums)
+            page_size = 10
+            total_pages = math.ceil(total_comments / page_size)
+            
+            comment_info["total_count"] = total_comments
+            comment_info["total_pages"] = total_pages
+            
+            logger.info(f"期刊 {journal_id} 共有 {total_comments} 条评论，{total_pages} 页")
 
             # 评论API URL
             api_url = f"{config.BASE_URL}/journalappAjax_comments_center.php"
 
             page = 1
-            max_pages = page_nums  # 限制最大页数，防止无限循环
+            max_pages = total_pages  # 限制最大页数，防止无限循环
 
             # 使用浏览器初始化时获取的 Cookie（已在基类中处理）
             cookie_value = self.get_current_cookie_value()
@@ -625,6 +647,7 @@ class DetailCrawler(BaseCrawler):
                         if new_cookie:
                             logger.info(f"[Cookie] 已获取新Cookie，重新开始获取评论")
                             cookie_value = new_cookie
+                            use_httpx = True  # 强制使用httpx（因为浏览器context中的cookie没更新）
                             cookie_refresh_attempted = True
                             # 清空已获取的评论，重新开始
                             comments.clear()
@@ -635,9 +658,9 @@ class DetailCrawler(BaseCrawler):
                             cookie_refresh_attempted = True
 
                     # 检查是否还有更多评论
-                    total_count = data.get("count", 0)
-                    if len(comments) >= total_count:
-                        logger.info(f"已获取全部 {total_count} 条评论")
+                    api_total_count = data.get("count", 0)
+                    if len(comments) >= api_total_count:
+                        logger.info(f"已获取全部 {api_total_count} 条评论")
                         break
 
                     page += 1
@@ -648,17 +671,33 @@ class DetailCrawler(BaseCrawler):
                     logger.error(f"解析JSON失败: {e}")
                     # 如果API不可用，降级使用页面爬取
                     logger.info("API获取失败，尝试从页面提取评论")
-                    return await self._extract_comments()
+                    fallback_comments = await self._extract_comments()
+                    comment_info["crawled_count"] = len(fallback_comments)
+                    return fallback_comments, comment_info
 
-            logger.info(f"通过API共获取 {len(comments)} 条评论")
+            comment_info["crawled_count"] = len(comments)
+            
+            # 验证爬取数量：至少要大于 (页数-1) * 10
+            # 例如：3页至少要有 20+ 条评论（最后一页可能不满10条）
+            min_expected = (total_pages - 1) * page_size if total_pages > 1 else 0
+            if len(comments) < min_expected and total_pages > 1:
+                logger.warning(
+                    f"[评论] 期刊 {journal_id} 评论数量异常: "
+                    f"页面显示 {total_comments} 条/{total_pages} 页, "
+                    f"实际爬取 {len(comments)} 条 (期望至少 {min_expected} 条)"
+                )
+            
+            logger.info(f"通过API共获取 {len(comments)} 条评论 (页面显示: {total_comments} 条)")
 
         except Exception as e:
             logger.error(f"API获取评论失败: {e}")
             # 降级使用页面爬取
             logger.info("降级使用页面爬取方式")
-            return await self._extract_comments()
+            fallback_comments = await self._extract_comments()
+            comment_info["crawled_count"] = len(fallback_comments)
+            return fallback_comments, comment_info
 
-        return comments
+        return comments, comment_info
 
     async def _fetch_with_httpx(self, api_url: str, params: Dict, cookie_value: str) -> Optional[str]:
         """使用httpx发起POST请求（带自定义Cookie），代理失败自动切换直连重试"""
