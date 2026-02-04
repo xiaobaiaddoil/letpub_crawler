@@ -22,6 +22,7 @@ RUN_MODE=master uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 # Run standalone mode (UI + local crawler)
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8999
 # Run worker node (crawler only)
 uv run python worker.py --worker-id worker-01
@@ -62,6 +63,7 @@ Category tasks → List tasks → Detail tasks (with comments)
 - `CrawlerService`: Orchestrates crawlers in standalone mode
 
 **Models** (`app/models/`):
+端口触
 
 - `CrawlTask`: Task queue with worker_id, locked_at for distributed locking
 - `Worker`: Tracks worker nodes (heartbeat, status)
@@ -89,3 +91,4 @@ Key settings:
 PostgreSQL with JSONB support. Dict adapter registered in `app/database.py` for automatic dict→JSONB conversion.
 
 Migration scripts in `migrations/` - run manually with psql.
+端口触
