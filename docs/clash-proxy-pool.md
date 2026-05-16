@@ -33,10 +33,14 @@ uv run python tools/sync_clash.py
 输出示例：
 
 ```
-同步完成: 73 节点。listener=127.0.0.1:30000。reload=成功。ProxyPool id=42
+同步完成: 58 节点。listener=127.0.0.1:30000。reload=成功。ProxyPool id=256
 ```
 
-订阅更新后重跑此命令即可。
+订阅更新或在 Verge UI 切换 profile 后重跑此命令即可。
+
+注意：本工具**直接修改 mihomo 启动配置 `clash-verge.yaml`**（在原 proxy-groups
+追加 crawler-pool group + 顶层 listeners 段）。Verge UI 切 profile 时会重新生成
+此文件，覆盖我们的注入，需重跑 CLI。原文件备份至 `clash-verge.yaml.bak.<ts>`。
 
 ## 验证
 
@@ -72,10 +76,10 @@ psql -h <host> -U <user> -d letpub_crawler -f docs/db/202605160001_clash_proxy_i
 
 ```bash
 # 备份还原
-cp ~/.local/share/io.github.clash-verge-rev.clash-verge-rev/profiles/Merge.yaml.bak.<ts> \
-   ~/.local/share/io.github.clash-verge-rev.clash-verge-rev/profiles/Merge.yaml
+cp ~/.local/share/io.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml.bak.<ts> \
+   ~/.local/share/io.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml
 
-# Verge UI 重新选 profile
+# 在 Verge UI 重新点选 profile（强制 Verge 重生成 clash-verge.yaml）
 
 # 下架 ProxyPool 条目
 psql -d letpub_crawler -c "UPDATE proxy_pool SET is_active=false WHERE source='clash';"

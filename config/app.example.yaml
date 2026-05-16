@@ -49,8 +49,10 @@ clash:
   enabled: false
   # Verge Rev 数据目录
   profile_dir: "/home/cc/.local/share/io.github.clash-verge-rev.clash-verge-rev"
-  # mihomo external-controller
-  controller: "http://127.0.0.1:9097"
+  # mihomo external-controller，支持两种形式：
+  #   http://127.0.0.1:9097                       (TCP HTTP，需在 Verge 开启)
+  #   unix:///tmp/verge/verge-mihomo.sock          (Unix domain socket，Verge 默认)
+  controller: "unix:///tmp/verge/verge-mihomo.sock"
   secret: "set-your-secret"
   # 注入的 listener 本地端口
   listener_port: 30000

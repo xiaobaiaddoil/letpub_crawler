@@ -46,15 +46,14 @@ async def run_sync(
         raise RuntimeError(f"profile {profile_path} 无可用节点")
     logger.info(f"提取节点 {len(names)} 个")
 
-    content = svc.render_merge_yaml(
-        names,
+    runtime_path = svc.inject_runtime_config(
+        proxy_names=names,
         listener_port=listener_port,
         group_name=group_name,
     )
-    merge_path = svc.write_merge(content)
-    logger.info(f"Merge.yaml 已写入: {merge_path}")
+    logger.info(f"已注入运行时配置: {runtime_path}")
 
-    reload_ok = await svc.reload_via_api()
+    reload_ok = await svc.reload_via_api(config_path=runtime_path)
     if not reload_ok:
         logger.warning(
             "mihomo 自动重载失败。请在 Verge UI 手动点选当前 profile 触发重载。"
@@ -72,7 +71,7 @@ async def run_sync(
 
     return {
         "nodes": len(names),
-        "merge_path": str(merge_path),
+        "runtime_path": str(runtime_path),
         "reload_ok": reload_ok,
         "proxy_id": proxy_id,
     }

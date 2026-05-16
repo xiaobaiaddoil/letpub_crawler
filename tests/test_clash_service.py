@@ -80,6 +80,35 @@ def test_get_current_profile_path_no_profiles_yaml(service, tmp_clash_dir):
         service.get_current_profile_path()
 
 
+def test_get_current_merge_file_uses_option_merge(service, tmp_clash_dir):
+    """profile 的 option.merge 指向某 uid 时，返回该 uid 对应的 file。"""
+    (tmp_clash_dir / "profiles.yaml").write_text(
+        "current: P1\n"
+        "items:\n"
+        "  - uid: M1\n"
+        "    type: merge\n"
+        "    file: M1.yaml\n"
+        "  - uid: P1\n"
+        "    type: remote\n"
+        "    file: P1.yaml\n"
+        "    option:\n"
+        "      merge: M1\n"
+    )
+    assert service.get_current_merge_file() == "M1.yaml"
+
+
+def test_get_current_merge_file_no_option(service, tmp_clash_dir):
+    """profile 无 option.merge 时返回顶层 'Merge.yaml'。"""
+    (tmp_clash_dir / "profiles.yaml").write_text(
+        "current: P1\n"
+        "items:\n"
+        "  - uid: P1\n"
+        "    type: remote\n"
+        "    file: P1.yaml\n"
+    )
+    assert service.get_current_merge_file() == "Merge.yaml"
+
+
 import yaml as _yaml
 
 MANAGED_HEADER = "# managed-by: letpub-crawler"
@@ -216,6 +245,41 @@ async def test_reload_via_api_connection_error(service, tmp_clash_dir, monkeypat
     assert ok is False
 
 
+@pytest.mark.asyncio
+async def test_reload_via_api_unix_socket(tmp_clash_dir, monkeypatch):
+    """controller 为 unix:// 形式时使用 _build_async_client_unix。"""
+    captured = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["auth"] = request.headers.get("authorization")
+        return httpx.Response(204)
+
+    transport = httpx.MockTransport(handler)
+
+    def fake_unix_client(path: str) -> httpx.AsyncClient:
+        captured["sock"] = path
+        return httpx.AsyncClient(transport=transport, timeout=5.0)
+
+    monkeypatch.setattr(
+        "app.services.clash_service._build_async_client_unix",
+        fake_unix_client,
+    )
+
+    svc = ClashService(
+        profile_dir=tmp_clash_dir,
+        controller="unix:///tmp/verge/verge-mihomo.sock",
+        secret="s",
+    )
+    cfg = tmp_clash_dir / "config.yaml"
+    cfg.write_text("x: 1\n", encoding="utf-8")
+    ok = await svc.reload_via_api(config_path=cfg)
+    assert ok is True
+    assert captured["sock"] == "/tmp/verge/verge-mihomo.sock"
+    assert "/configs?force=true" in captured["url"]
+    assert captured["auth"] == "Bearer s"
+
+
 def test_sync_proxy_pool_inserts_single_entry(service, in_memory_db):
     affected = service.sync_proxy_pool(
         db=in_memory_db,
@@ -262,3 +326,89 @@ def test_sync_proxy_pool_changing_port_deactivates_old(service, in_memory_db):
         ProxyPool.is_active == True,
     ).one()
     assert new.port == 30001
+
+
+def test_inject_runtime_config_appends_block(service, tmp_clash_dir):
+    runtime = tmp_clash_dir / "clash-verge.yaml"
+    runtime.write_text("mode: rule\nmixed-port: 7897\n", encoding="utf-8")
+
+    result_path = service.inject_runtime_config(
+        proxy_names=["A", "B"],
+        listener_port=30000,
+    )
+    assert result_path == runtime
+    data = _yaml.safe_load(runtime.read_text(encoding="utf-8"))
+    assert data["mode"] == "rule"
+    groups = data["proxy-groups"]
+    assert any(g["name"] == "crawler-pool" for g in groups)
+    listeners = data["listeners"]
+    assert any(
+        l["name"] == "crawler-lb" and l["port"] == 30000
+        for l in listeners
+    )
+
+
+def test_inject_runtime_config_idempotent(service, tmp_clash_dir):
+    """重复注入只保留最后一次 group/listener，不累加。"""
+    runtime = tmp_clash_dir / "clash-verge.yaml"
+    runtime.write_text("mode: rule\n", encoding="utf-8")
+    service.inject_runtime_config(["A"], listener_port=30000)
+    service.inject_runtime_config(["X", "Y", "Z"], listener_port=30001)
+    data = _yaml.safe_load(runtime.read_text(encoding="utf-8"))
+    pools = [g for g in data["proxy-groups"] if g["name"] == "crawler-pool"]
+    assert len(pools) == 1
+    assert pools[0]["proxies"] == ["X", "Y", "Z"]
+    listeners = [l for l in data["listeners"] if l["name"] == "crawler-lb"]
+    assert len(listeners) == 1
+    assert listeners[0]["port"] == 30001
+
+
+def test_inject_runtime_config_merges_with_existing_groups(service, tmp_clash_dir):
+    """已有 proxy-groups 时新 group 追加，旧 group 保留。"""
+    runtime = tmp_clash_dir / "clash-verge.yaml"
+    runtime.write_text(
+        "mode: rule\n"
+        "proxy-groups:\n"
+        "- name: existing\n"
+        "  type: select\n"
+        "  proxies: [a]\n",
+        encoding="utf-8",
+    )
+    service.inject_runtime_config(["A", "B"], listener_port=30000)
+    data = _yaml.safe_load(runtime.read_text(encoding="utf-8"))
+    names = [g["name"] for g in data["proxy-groups"]]
+    assert "existing" in names
+    assert "crawler-pool" in names
+
+
+def test_inject_runtime_config_missing_runtime(service, tmp_clash_dir):
+    with pytest.raises(FileNotFoundError, match="clash-verge.yaml"):
+        service.inject_runtime_config(["A"])
+
+
+def test_inject_runtime_config_creates_backup(service, tmp_clash_dir):
+    runtime = tmp_clash_dir / "clash-verge.yaml"
+    runtime.write_text("mode: rule\n", encoding="utf-8")
+    service.inject_runtime_config(["A"])
+    backups = list(tmp_clash_dir.glob("clash-verge.yaml.bak.*"))
+    assert len(backups) == 1
+
+
+def test_strip_managed_block_no_marker(service):
+    content = "mode: rule\nmixed-port: 7897\n"
+    assert service._strip_managed_block(content) == content
+
+
+def test_strip_managed_block_removes_section(service):
+    content = (
+        "mode: rule\n"
+        f"{ClashService.MANAGED_BLOCK_BEGIN}\n"
+        "listeners:\n"
+        "- port: 30000\n"
+        f"{ClashService.MANAGED_BLOCK_END}\n"
+        "extra: tail\n"
+    )
+    out = service._strip_managed_block(content)
+    assert "listeners" not in out
+    assert "extra: tail" in out
+    assert "mode: rule" in out
