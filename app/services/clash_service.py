@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import time
 from pathlib import Path
 from typing import List
 
@@ -118,3 +120,24 @@ class ClashService:
             "# 自动生成，请勿手动修改。重生方式：uv run python tools/sync_clash.py\n"
             f"{body_yaml}"
         )
+
+    def write_merge(self, content: str) -> Path:
+        """原子写 profiles/Merge.yaml；非托管旧文件备份后覆盖。"""
+        target = self.profile_dir / "profiles" / "Merge.yaml"
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        if target.exists():
+            try:
+                existing = target.read_text(encoding="utf-8")
+            except OSError:
+                existing = ""
+            if not existing.startswith(self.MANAGED_HEADER):
+                ts = int(time.time())
+                backup = target.with_suffix(f".yaml.bak.{ts}")
+                backup.write_text(existing, encoding="utf-8")
+                logger.info(f"备份原 Merge.yaml → {backup}")
+
+        tmp = target.with_suffix(".yaml.tmp")
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, target)
+        return target

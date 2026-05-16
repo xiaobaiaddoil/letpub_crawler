@@ -123,3 +123,34 @@ def test_render_merge_yaml_custom_group_name(service):
     data = _yaml.safe_load(out)
     assert data["proxy-groups"][0]["name"] == "my-pool"
     assert data["listeners"][0]["proxy"] == "my-pool"
+
+
+def test_write_merge_creates_file(service, tmp_clash_dir):
+    content = service.render_merge_yaml(["A"])
+    path = service.write_merge(content)
+    assert path == tmp_clash_dir / "profiles" / "Merge.yaml"
+    assert path.read_text(encoding="utf-8") == content
+
+
+def test_write_merge_overwrites_managed(service, tmp_clash_dir):
+    target = tmp_clash_dir / "profiles" / "Merge.yaml"
+    target.write_text(
+        f"{ClashService.MANAGED_HEADER}\nold\n", encoding="utf-8"
+    )
+    new = service.render_merge_yaml(["A"])
+    service.write_merge(new)
+    assert target.read_text(encoding="utf-8") == new
+    backups = list((tmp_clash_dir / "profiles").glob("Merge.yaml.bak.*"))
+    assert backups == []
+
+
+def test_write_merge_backups_unmanaged(service, tmp_clash_dir):
+    target = tmp_clash_dir / "profiles" / "Merge.yaml"
+    original = "profile:\n  store-selected: true\n"
+    target.write_text(original, encoding="utf-8")
+    new = service.render_merge_yaml(["A"])
+    service.write_merge(new)
+    assert target.read_text(encoding="utf-8") == new
+    backups = list((tmp_clash_dir / "profiles").glob("Merge.yaml.bak.*"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == original
