@@ -29,6 +29,9 @@ uv run python worker.py --worker-id worker-01
 
 # Run database migrations
 psql -h <host> -U <user> -d letpub_crawler -f migrations/<script>.sql
+
+# Sync local Clash Verge nodes into proxy pool (see docs/clash-proxy-pool.md)
+uv run python tools/sync_clash.py
 ```
 
 ## Architecture
