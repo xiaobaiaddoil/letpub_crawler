@@ -10,6 +10,49 @@ from app.config import config
 logger = logging.getLogger(__name__)
 
 
+# 反检测注入脚本：消除 Playwright/Chromium 自动化特征，使指纹接近真实浏览器
+_STEALTH_INIT_SCRIPT = """
+// navigator.webdriver
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+
+// chrome runtime（headless Chromium 默认无此对象）
+window.chrome = window.chrome || {};
+window.chrome.runtime = window.chrome.runtime || {};
+
+// plugins
+Object.defineProperty(navigator, 'plugins', {
+    get: () => [1, 2, 3, 4, 5].map(() => ({
+        name: 'Plugin', filename: 'plugin.dll', description: 'Plugin', length: 1
+    }))
+});
+
+// languages
+Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en']});
+
+// permissions.query 修正（headless 下 Notification.permission 异常）
+const _origQuery = window.navigator.permissions && window.navigator.permissions.query;
+if (_origQuery) {
+    window.navigator.permissions.query = (p) => (
+        p.name === 'notifications'
+            ? Promise.resolve({state: Notification.permission})
+            : _origQuery(p)
+    );
+}
+
+// WebGL vendor / renderer
+const _getParameter = WebGLRenderingContext.prototype.getParameter;
+WebGLRenderingContext.prototype.getParameter = function(parameter) {
+    if (parameter === 37445) return 'Intel Inc.';
+    if (parameter === 37446) return 'Intel Iris Pro';
+    return _getParameter.call(this, parameter);
+};
+
+// 硬件指标
+Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+"""
+
+
 class BaseCrawler(ABC):
     """爬虫基类"""
 
@@ -81,11 +124,18 @@ class BaseCrawler(ABC):
         """
         self._playwright = await async_playwright().start()
         
-        # 浏览器启动参数
+        # 浏览器启动参数（消除 Playwright/Chromium 自动化特征）
         launch_args = [
             "--disable-blink-features=AutomationControlled",
             "--no-sandbox",
             "--disable-dev-shm-usage",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--disable-site-isolation-trials",
+            "--disable-web-security",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-infobars",
+            "--start-maximized",
         ]
         
         # 获取代理
@@ -170,7 +220,11 @@ class BaseCrawler(ABC):
             user_agent=user_agent,
             viewport={"width": 1920, "height": 1080},
             locale="zh-CN",
+            timezone_id="Asia/Shanghai",
         )
+
+        # 指纹强化：在每个页面加载前注入反检测脚本
+        await self.context.add_init_script(_STEALTH_INIT_SCRIPT)
 
         # 获取 Cookie：优先从 Cookie 池获取，否则使用本地配置
         cookie_value = await self._get_cookie_from_pool()
