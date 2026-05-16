@@ -76,11 +76,21 @@ class ProxyService:
         return proxy
     
     def report_proxy_result(self, proxy_id: int, success: bool):
-        """报告代理使用结果"""
+        """报告代理使用结果。
+
+        source='clash' 的条目代表 mihomo load-balance 入口，
+        节点健康检查由 mihomo 内核负责，应用层不打分、不下架。
+        """
         proxy = self.db.query(ProxyPool).filter(ProxyPool.id == proxy_id).first()
         if not proxy:
             return
-        
+
+        if proxy.source == "clash":
+            if success:
+                proxy.success_count += 1
+            self.db.commit()
+            return
+
         if success:
             proxy.success_count += 1
             proxy.fail_count = 0
@@ -90,7 +100,7 @@ class ProxyService:
             # 失败一次即标记为无效
             proxy.is_valid = False
             logger.warning(f"[代理] {proxy.ip}:{proxy.port} 请求失败，已标记无效")
-        
+
         self.db.commit()
 
     async def check_proxy(self, proxy: ProxyPool) -> bool:

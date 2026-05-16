@@ -39,3 +39,5 @@ markers = [
     "integration: tests requiring running Clash Verge",
 ]
 testpaths = ["tests"]
+# 这两个文件是手动调试脚本（接受 argparse 参数），非 pytest 测试，跳过收集
+addopts = "--ignore=tests/test_comments_api.py --ignore=tests/test_detail_crawler.py"
