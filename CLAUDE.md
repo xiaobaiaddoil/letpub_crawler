@@ -80,18 +80,33 @@ Tasks use PostgreSQL row-level locking to prevent duplicate crawling:
 2. `TASK_LOCK_TIMEOUT` releases stuck tasks automatically
 3. Workers send heartbeats; offline workers' tasks get released
 
-### Configuration (`.env`)
+### Configuration (`config/app.yaml`)
+
+主配置走 YAML 文件（`config/app.yaml`，已 .gitignore；模板见 `config/app.example.yaml`）。`config/proxy.yaml` 存外部代理服务（kuaidaili 等）配置。
 
 Key settings:
 
-- `RUN_MODE`: master/worker/standalone
-- `DATABASE_URL`: PostgreSQL connection (shared by all nodes)
-- `WORKER_ID`: Unique identifier for worker nodes
-- `TASK_LOCK_TIMEOUT`: Seconds before stuck tasks are released (default: 300)
+- `run_mode`: master/worker/standalone
+- `database`: PostgreSQL connection (shared by all nodes)
+- `distributed.worker_id`: Unique identifier for worker nodes
+- `distributed.task_lock_timeout`: Seconds before stuck tasks are released (default: 600)
+- `clash`: 本机 Clash Verge 代理池接入（见 `docs/clash-proxy-pool.md`）
+
+### Clash 本机代理池
+
+复用本机 Clash Verge Rev 节点池作为爬虫代理来源（不影响系统流量）：
+
+- `tools/sync_clash.py`：CLI，读 Verge profile → 注入 mihomo 启动配置 `clash-verge.yaml` → 触发重载 → upsert ProxyPool（source=clash, 127.0.0.1:30000）
+- `app/services/clash_service.py`：集成层（profile 读取 / Merge 渲染 / runtime 注入 / mihomo API）
+- 爬虫 `BaseCrawler._get_proxy_from_pool()` 透过 `/api/proxies/random` 拿到 listener 地址，零改动
+- ProxyService 对 `source='clash'` 跳过失败惩罚（健康检查交给 mihomo 内核）
+- 详见 `docs/clash-proxy-pool.md` 与 `docs/superpowers/specs/2026-05-16-clash-proxy-pool-design.md`
 
 ## Database
 
 PostgreSQL with JSONB support. Dict adapter registered in `app/database.py` for automatic dict→JSONB conversion.
 
 Migration scripts in `migrations/` - run manually with psql.
-端口触
+
+新增的 SQL 脚本：`docs/db/202605160001_clash_proxy_index.sql`（ProxyPool source 复合索引；因 `migrations/` 在 .gitignore，本特性脚本暂存于 `docs/db/`）。
+
