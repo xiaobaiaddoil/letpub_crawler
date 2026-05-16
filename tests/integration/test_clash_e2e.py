@@ -59,18 +59,21 @@ async def test_listener_reachable(listener_port):
 
 @pytest.mark.asyncio
 async def test_listener_round_robin_diverse_ips(listener_port):
-    """连发多次经 listener，至少出现 2 个不同出口 IP。"""
+    """连发多次经 listener，至少出现 2 个不同出口 IP。
+
+    每次用新 AsyncClient（避免 HTTP keep-alive 黏单 conn → 单节点）。
+    """
     proxy = f"http://127.0.0.1:{listener_port}"
     ips = set()
-    async with httpx.AsyncClient(proxy=proxy, timeout=15.0) as client:
-        for _ in range(8):
-            try:
+    for _ in range(8):
+        try:
+            async with httpx.AsyncClient(proxy=proxy, timeout=15.0) as client:
                 resp = await client.get("https://api.ipify.org")
                 if resp.status_code == 200:
                     ips.add(resp.text.strip())
-            except httpx.HTTPError:
-                pass
-            await asyncio.sleep(0.5)
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0.5)
     assert len(ips) >= 2, f"出口 IP 仅 {ips}，分发未生效"
 
 
