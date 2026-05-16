@@ -76,3 +76,50 @@ def test_get_current_profile_path_no_match(service, tmp_clash_dir):
 def test_get_current_profile_path_no_profiles_yaml(service, tmp_clash_dir):
     with pytest.raises(FileNotFoundError, match="profiles.yaml"):
         service.get_current_profile_path()
+
+
+import yaml as _yaml
+
+MANAGED_HEADER = "# managed-by: letpub-crawler"
+
+
+def test_render_merge_yaml_managed_header(service):
+    out = service.render_merge_yaml(["A", "B"])
+    assert out.startswith(MANAGED_HEADER)
+
+
+def test_render_merge_yaml_structure(service):
+    out = service.render_merge_yaml(["A", "B", "C"])
+    data = _yaml.safe_load(out)
+    assert "proxy-groups" in data
+    assert "listeners" in data
+    assert len(data["proxy-groups"]) == 1
+    assert len(data["listeners"]) == 1
+
+
+def test_render_merge_yaml_listener_port(service):
+    out = service.render_merge_yaml(["A"], listener_port=31234)
+    data = _yaml.safe_load(out)
+    listener = data["listeners"][0]
+    assert listener["port"] == 31234
+    assert listener["listen"] == "127.0.0.1"
+    assert listener["type"] == "mixed"
+    assert listener["proxy"] == "crawler-pool"
+
+
+def test_render_merge_yaml_group_proxies(service):
+    names = ["节点A", "节点B", "节点C"]
+    out = service.render_merge_yaml(names)
+    data = _yaml.safe_load(out)
+    group = data["proxy-groups"][0]
+    assert group["name"] == "crawler-pool"
+    assert group["type"] == "load-balance"
+    assert group["strategy"] == "round-robin"
+    assert group["proxies"] == names
+
+
+def test_render_merge_yaml_custom_group_name(service):
+    out = service.render_merge_yaml(["A"], group_name="my-pool")
+    data = _yaml.safe_load(out)
+    assert data["proxy-groups"][0]["name"] == "my-pool"
+    assert data["listeners"][0]["proxy"] == "my-pool"
