@@ -2,6 +2,8 @@
 import pytest
 from pathlib import Path
 
+import httpx
+
 from app.services.clash_service import ClashService
 
 
@@ -154,3 +156,61 @@ def test_write_merge_backups_unmanaged(service, tmp_clash_dir):
     backups = list((tmp_clash_dir / "profiles").glob("Merge.yaml.bak.*"))
     assert len(backups) == 1
     assert backups[0].read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
+async def test_reload_via_api_success(service, tmp_clash_dir, monkeypatch):
+    captured = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["method"] = request.method
+        captured["auth"] = request.headers.get("authorization")
+        captured["body"] = request.content.decode()
+        return httpx.Response(204)
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "app.services.clash_service._build_async_client",
+        lambda: httpx.AsyncClient(transport=transport, timeout=5.0),
+    )
+    cfg = tmp_clash_dir / "config.yaml"
+    cfg.write_text("mixed-port: 7897\n", encoding="utf-8")
+    ok = await service.reload_via_api(config_path=cfg)
+    assert ok is True
+    assert captured["method"] == "PUT"
+    assert "/configs?force=true" in captured["url"]
+    assert captured["auth"] == "Bearer test-secret"
+    assert str(cfg) in captured["body"]
+
+
+@pytest.mark.asyncio
+async def test_reload_via_api_unauthorized(service, tmp_clash_dir, monkeypatch):
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401)
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "app.services.clash_service._build_async_client",
+        lambda: httpx.AsyncClient(transport=transport, timeout=5.0),
+    )
+    cfg = tmp_clash_dir / "config.yaml"
+    cfg.write_text("x: 1\n", encoding="utf-8")
+    ok = await service.reload_via_api(config_path=cfg)
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_reload_via_api_connection_error(service, tmp_clash_dir, monkeypatch):
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "app.services.clash_service._build_async_client",
+        lambda: httpx.AsyncClient(transport=transport, timeout=5.0),
+    )
+    cfg = tmp_clash_dir / "config.yaml"
+    cfg.write_text("x: 1\n", encoding="utf-8")
+    ok = await service.reload_via_api(config_path=cfg)
+    assert ok is False

@@ -5,8 +5,9 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
+import httpx
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -141,3 +142,39 @@ class ClashService:
         tmp.write_text(content, encoding="utf-8")
         os.replace(tmp, target)
         return target
+
+    async def reload_via_api(self, config_path: Optional[Path] = None) -> bool:
+        """调 mihomo external-controller PUT /configs?force=true 触发重载。"""
+        if config_path is None:
+            config_path = self.profile_dir / "config.yaml"
+
+        url = f"{self.controller}/configs?force=true"
+        headers = {"Authorization": f"Bearer {self.secret}"}
+        body = {"path": str(config_path)}
+
+        try:
+            client = _build_async_client()
+            async with client:
+                resp = await client.put(url, headers=headers, json=body)
+        except httpx.HTTPError as e:
+            logger.warning(f"调 mihomo API 失败（{type(e).__name__}）: {e}")
+            return False
+
+        if 200 <= resp.status_code < 300:
+            logger.info("mihomo 已重载配置")
+            return True
+
+        if resp.status_code == 401:
+            logger.warning(
+                "mihomo API 鉴权失败 (401)。请确认 controller secret 与 config.yaml 中一致。"
+            )
+        else:
+            logger.warning(
+                f"mihomo API 返 {resp.status_code}: {resp.text[:200]}"
+            )
+        return False
+
+
+def _build_async_client() -> httpx.AsyncClient:
+    """工厂方法，便于测试 monkeypatch。"""
+    return httpx.AsyncClient(timeout=5.0)
