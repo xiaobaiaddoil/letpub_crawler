@@ -103,7 +103,46 @@ class Config:
     @property
     def ENCRYPTION_KEY(self) -> str:
         return str(get_nested(self._app_config, "encryption_key", default="") or "")
-    
+
+    @property
+    def CLASH_ENABLED(self) -> bool:
+        return bool(get_nested(self._app_config, "clash", "enabled", default=False))
+
+    @property
+    def CLASH_PROFILE_DIR(self) -> str:
+        return str(get_nested(
+            self._app_config, "clash", "profile_dir",
+            default="",
+        ) or "")
+
+    @property
+    def CLASH_CONTROLLER(self) -> str:
+        return str(get_nested(
+            self._app_config, "clash", "controller",
+            default="http://127.0.0.1:9097",
+        ))
+
+    @property
+    def CLASH_SECRET(self) -> str:
+        return str(get_nested(
+            self._app_config, "clash", "secret",
+            default="",
+        ) or "")
+
+    @property
+    def CLASH_LISTENER_PORT(self) -> int:
+        return int(get_nested(
+            self._app_config, "clash", "listener_port",
+            default=30000,
+        ))
+
+    @property
+    def CLASH_GROUP_NAME(self) -> str:
+        return str(get_nested(
+            self._app_config, "clash", "group_name",
+            default="crawler-pool",
+        ))
+
     # Cookie 配置（运行时可修改）
     LETPUB_COOKIE: str = ""
     

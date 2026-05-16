@@ -42,3 +42,17 @@ distributed:
 
 # 加密密钥（用于加密敏感信息，可用 Fernet.generate_key() 生成）
 encryption_key: ""
+
+# Clash Verge Rev 集成（让爬虫复用本机 Clash 节点池）
+# 启用后，运行 `uv run python tools/sync_clash.py` 注入 Merge.yaml + 写入 ProxyPool
+clash:
+  enabled: false
+  # Verge Rev 数据目录
+  profile_dir: "/home/cc/.local/share/io.github.clash-verge-rev.clash-verge-rev"
+  # mihomo external-controller
+  controller: "http://127.0.0.1:9097"
+  secret: "set-your-secret"
+  # 注入的 listener 本地端口
+  listener_port: 30000
+  # crawler-pool 在 Merge 中的 group 名
+  group_name: "crawler-pool"
