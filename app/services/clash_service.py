@@ -45,3 +45,33 @@ class ClashService:
             seen.add(name)
             names.append(name)
         return names
+
+    def get_current_profile_path(self) -> Path:
+        """读 profiles.yaml 取当前 current uid，返回对应 profile 文件绝对路径。"""
+        meta = self.profile_dir / "profiles.yaml"
+        if not meta.exists():
+            raise FileNotFoundError(
+                f"profiles.yaml 不存在: {meta}（确认 Clash Verge 已启动并加载过 profile）"
+            )
+
+        with open(meta, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+
+        current = data.get("current")
+        if not current:
+            raise FileNotFoundError(
+                "profiles.yaml 中无 current 字段（请在 Verge UI 选中一个 profile）"
+            )
+
+        for item in data.get("items", []) or []:
+            if item.get("uid") == current:
+                file = item.get("file")
+                if not file:
+                    raise FileNotFoundError(
+                        f"profile uid={current} 缺少 file 字段"
+                    )
+                return self.profile_dir / "profiles" / file
+
+        raise FileNotFoundError(
+            f"profile uid={current} 在 items 中无匹配项"
+        )

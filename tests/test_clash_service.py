@@ -44,3 +44,35 @@ def test_extract_proxy_names_dedupe(service, tmp_path):
         "  - {name: A, type: trojan, server: c, port: 1, password: x}\n"
     )
     assert service.extract_proxy_names(p) == ["A", "B"]
+
+
+def test_get_current_profile_path_resolves_uid(service, tmp_clash_dir):
+    (tmp_clash_dir / "profiles.yaml").write_text(
+        "current: AAA\n"
+        "items:\n"
+        "  - uid: AAA\n"
+        "    type: remote\n"
+        "    file: AAA.yaml\n"
+        "  - uid: BBB\n"
+        "    type: remote\n"
+        "    file: BBB.yaml\n"
+    )
+    (tmp_clash_dir / "profiles" / "AAA.yaml").write_text("proxies: []\n")
+    path = service.get_current_profile_path()
+    assert path == tmp_clash_dir / "profiles" / "AAA.yaml"
+
+
+def test_get_current_profile_path_no_match(service, tmp_clash_dir):
+    (tmp_clash_dir / "profiles.yaml").write_text(
+        "current: ZZZ\n"
+        "items:\n"
+        "  - uid: AAA\n"
+        "    file: AAA.yaml\n"
+    )
+    with pytest.raises(FileNotFoundError, match="ZZZ"):
+        service.get_current_profile_path()
+
+
+def test_get_current_profile_path_no_profiles_yaml(service, tmp_clash_dir):
+    with pytest.raises(FileNotFoundError, match="profiles.yaml"):
+        service.get_current_profile_path()
