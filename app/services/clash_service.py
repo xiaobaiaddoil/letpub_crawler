@@ -4,11 +4,15 @@ from __future__ import annotations
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 
 import httpx
 import yaml
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +177,40 @@ class ClashService:
                 f"mihomo API 返 {resp.status_code}: {resp.text[:200]}"
             )
         return False
+
+    def sync_proxy_pool(
+        self,
+        db: "Session",
+        node_count: int,
+        listener_port: int = 30000,
+    ) -> int:
+        """同步 ProxyPool：旧 source=clash 全下架，写入 1 条聚合条目。返回新插入条目的 id。"""
+        from app.models.proxy_pool import ProxyPool
+
+        db.query(ProxyPool).filter(
+            ProxyPool.source == "clash",
+            ProxyPool.is_active == True,
+        ).update({"is_active": False}, synchronize_session=False)
+
+        entry = ProxyPool(
+            ip="127.0.0.1",
+            port=listener_port,
+            protocol="http",
+            proxy_type="direct",
+            source="clash",
+            area="local-clash",
+            is_active=True,
+            is_valid=True,
+            success_count=0,
+            fail_count=0,
+            total_fail_count=0,
+            remark=f"clash load-balance: {node_count} nodes",
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(entry)
+        db.commit()
+        db.refresh(entry)
+        return entry.id
 
 
 def _build_async_client() -> httpx.AsyncClient:

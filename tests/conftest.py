@@ -4,7 +4,7 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.database import Base
+from app.models.proxy_pool import ProxyPool
 
 
 @pytest.fixture
@@ -17,9 +17,9 @@ def tmp_clash_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def in_memory_db():
-    """内存 SQLite DB（用于 ProxyService 单测）。"""
+    """内存 SQLite DB（仅建 ProxyPool 表，避开 JSONB 等非 SQLite 兼容类型）。"""
     engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
+    ProxyPool.__table__.create(engine)
     SessionLocal = sessionmaker(bind=engine)
     session = SessionLocal()
     yield session

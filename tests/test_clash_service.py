@@ -214,3 +214,51 @@ async def test_reload_via_api_connection_error(service, tmp_clash_dir, monkeypat
     cfg.write_text("x: 1\n", encoding="utf-8")
     ok = await service.reload_via_api(config_path=cfg)
     assert ok is False
+
+
+def test_sync_proxy_pool_inserts_single_entry(service, in_memory_db):
+    affected = service.sync_proxy_pool(
+        db=in_memory_db,
+        node_count=42,
+        listener_port=30000,
+    )
+    from app.models.proxy_pool import ProxyPool
+    rows = in_memory_db.query(ProxyPool).filter(
+        ProxyPool.source == "clash"
+    ).all()
+    assert len(rows) == 1
+    p = rows[0]
+    assert p.ip == "127.0.0.1"
+    assert p.port == 30000
+    assert p.protocol == "http"
+    assert p.is_active is True
+    assert p.is_valid is True
+    assert "42 nodes" in (p.remark or "")
+    assert affected == p.id
+
+
+def test_sync_proxy_pool_idempotent(service, in_memory_db):
+    service.sync_proxy_pool(in_memory_db, node_count=10, listener_port=30000)
+    service.sync_proxy_pool(in_memory_db, node_count=15, listener_port=30000)
+    from app.models.proxy_pool import ProxyPool
+    active = in_memory_db.query(ProxyPool).filter(
+        ProxyPool.source == "clash",
+        ProxyPool.is_active == True,
+    ).count()
+    inactive = in_memory_db.query(ProxyPool).filter(
+        ProxyPool.source == "clash",
+        ProxyPool.is_active == False,
+    ).count()
+    assert active == 1
+    assert inactive == 1
+
+
+def test_sync_proxy_pool_changing_port_deactivates_old(service, in_memory_db):
+    service.sync_proxy_pool(in_memory_db, node_count=10, listener_port=30000)
+    service.sync_proxy_pool(in_memory_db, node_count=10, listener_port=30001)
+    from app.models.proxy_pool import ProxyPool
+    new = in_memory_db.query(ProxyPool).filter(
+        ProxyPool.source == "clash",
+        ProxyPool.is_active == True,
+    ).one()
+    assert new.port == 30001
