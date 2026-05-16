@@ -1,0 +1,12 @@
+port: 7890
+mode: Rule
+proxies:
+  - {name: "节点A", server: a.example.com, port: 443, type: trojan, password: x}
+  - {name: "节点B", server: b.example.com, port: 443, type: vless, uuid: y}
+  - {name: "节点C", server: c.example.com, port: 443, type: trojan, password: z}
+proxy-groups:
+  - name: select
+    type: select
+    proxies: ["节点A", "节点B", "节点C"]
+rules:
+  - "MATCH,select"
