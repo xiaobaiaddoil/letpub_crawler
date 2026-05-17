@@ -908,15 +908,14 @@ class DetailCrawler(BaseCrawler):
             publish_time = None
             publish_span = soup.find('strong', string=re.compile(r'发表时间'))
             if publish_span:
-                parent_text = publish_span.find_parent().get_text().strip()
-                # 移除 "发表时间：" 前缀
-                time_str = parent_text.replace('发表时间：', '').replace('发表时间', '').strip()
+                from bs4 import NavigableString as _NS
+                next_sib = publish_span.next_sibling
+                time_str = str(next_sib).lstrip('：:').strip() if isinstance(next_sib, _NS) else ""
                 if time_str:
                     try:
                         from datetime import datetime
                         publish_time = datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S')
                     except ValueError:
-                        # 如果解析失败，记录日志但继续
                         logger.warning(f"无法解析发表时间: {time_str}")
                         publish_time = None
 
@@ -924,9 +923,9 @@ class DetailCrawler(BaseCrawler):
             update_time = None
             update_span = soup.find('strong', string=re.compile(r'最后更新'))
             if update_span:
-                parent_text = update_span.find_parent().get_text().strip()
-                # 移除 "最后更新：" 前缀
-                time_str = parent_text.replace('最后更新：', '').replace('最后更新', '').strip()
+                from bs4 import NavigableString as _NS
+                next_sib = update_span.next_sibling
+                time_str = str(next_sib).lstrip('：:').strip() if isinstance(next_sib, _NS) else ""
                 if time_str:
                     try:
                         from datetime import datetime
