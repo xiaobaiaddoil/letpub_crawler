@@ -13,7 +13,7 @@ from app.crawler.category_crawler import CategoryCrawler
 from app.crawler.list_crawler import ListCrawler
 from app.crawler.detail_crawler import DetailCrawler, DataValidationError
 from app.database import SessionLocal
-from app import config
+from app.config import config
 
 logger = logging.getLogger(__name__)
 
