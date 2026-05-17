@@ -116,14 +116,15 @@ class BaseCrawler(ABC):
         except Exception as e:
             logger.warning(f"[代理] 报告结果失败: {e}")
 
-    async def init_browser(self, use_proxy: bool = True):
+    async def init_browser(self, use_proxy: bool = True, use_cookie: bool = True):
         """初始化浏览器
-        
+
         Args:
             use_proxy: 是否使用代理，默认为 True
+            use_cookie: 是否注入 Cookie，默认为 True。基本信息爬取传 False。
         """
         self._playwright = await async_playwright().start()
-        
+
         # 浏览器启动参数（消除 Playwright/Chromium 自动化特征）
         launch_args = [
             "--disable-blink-features=AutomationControlled",
@@ -137,17 +138,17 @@ class BaseCrawler(ABC):
             "--disable-infobars",
             "--start-maximized",
         ]
-        
+
         # 获取代理
         proxy_config = None
         self._using_direct = False
-        
+
         if use_proxy:
             proxy_info = await self._get_proxy_from_pool()
             if proxy_info:
                 server = f"{proxy_info.get('protocol', 'http')}://{proxy_info['ip']}:{proxy_info['port']}"
                 proxy_config = {"server": server}
-                
+
                 # 如果有用户名密码，添加认证
                 if proxy_info.get("username") and proxy_info.get("password"):
                     proxy_config["username"] = proxy_info["username"]
@@ -163,13 +164,13 @@ class BaseCrawler(ABC):
         else:
             self._using_direct = True
             logger.info("[代理] 已禁用代理，使用直连")
-        
+
         self.browser = await self._playwright.chromium.launch(
             headless=True,
             args=launch_args,
             proxy=proxy_config
         )
-        await self._create_context()
+        await self._create_context(use_cookie=use_cookie)
 
     async def _get_cookie_from_pool(self) -> Optional[str]:
         """从 Master 服务器的 Cookie 池获取随机 Cookie"""
@@ -213,8 +214,12 @@ class BaseCrawler(ABC):
         except Exception as e:
             logger.warning(f"报告 Cookie 结果失败: {e}")
 
-    async def _create_context(self):
-        """创建浏览器上下文"""
+    async def _create_context(self, use_cookie: bool = True):
+        """创建浏览器上下文
+
+        Args:
+            use_cookie: 是否注入 Cookie。基本信息爬取传 False，评论爬取传 True。
+        """
         user_agent = random.choice(config.USER_AGENTS)
         self.context = await self.browser.new_context(
             user_agent=user_agent,
@@ -226,18 +231,20 @@ class BaseCrawler(ABC):
         # 指纹强化：在每个页面加载前注入反检测脚本
         await self.context.add_init_script(_STEALTH_INIT_SCRIPT)
 
-        # 获取 Cookie：优先从 Cookie 池获取，否则使用本地配置
-        cookie_value = await self._get_cookie_from_pool()
-        if not cookie_value:
-            cookie_value = config.LETPUB_COOKIE
-            if cookie_value:
-                logger.info("使用本地配置 Cookie")
+        if use_cookie:
+            # 获取 Cookie：优先从 Cookie 池获取，否则使用本地配置
+            cookie_value = await self._get_cookie_from_pool()
+            if not cookie_value:
+                cookie_value = config.LETPUB_COOKIE
+                if cookie_value:
+                    logger.info("使用本地配置 Cookie")
 
-        # 设置 Cookie
-        if cookie_value:
-            cookies = self._parse_cookies(cookie_value)
-            if cookies:
-                await self.context.add_cookies(cookies)
+            if cookie_value:
+                cookies = self._parse_cookies(cookie_value)
+                if cookies:
+                    await self.context.add_cookies(cookies)
+        else:
+            logger.debug("[Cookie] 基本信息爬取，跳过 Cookie 注入")
 
         self.page = await self.context.new_page()
 
@@ -285,7 +292,7 @@ class BaseCrawler(ABC):
         logger.debug(f"等待 {delay:.2f} 秒")
         await asyncio.sleep(delay)
 
-    async def goto(self, url: str, wait_until: str = "networkidle") -> bool:
+    async def goto(self, url: str, wait_until: str = "domcontentloaded") -> bool:
         """访问页面，代理失败自动切换直连重试"""
         proxy_info = self.get_proxy_display()
         try:
@@ -295,16 +302,17 @@ class BaseCrawler(ABC):
             return True
         except Exception as e:
             logger.error(f"访问页面失败: {url} [代理: {proxy_info}], 错误: {e}")
-            
+
             # 如果使用代理失败，尝试切换直连重试
             if self._current_proxy_info and not self._using_direct:
                 logger.warning(f"[代理] {proxy_info} 失败，切换直连重试...")
                 await self.report_proxy_result(success=False)
-                
-                # 关闭当前浏览器，用直连重新初始化
+
+                # 关闭当前浏览器，用直连重新初始化（保留 use_cookie 状态）
+                use_cookie = bool(self._current_cookie_info or config.LETPUB_COOKIE)
                 await self.close()
-                await self.init_browser(use_proxy=False)
-                
+                await self.init_browser(use_proxy=False, use_cookie=use_cookie)
+
                 # 直连重试
                 try:
                     logger.info(f"访问: {url} [直连重试]")
@@ -314,7 +322,7 @@ class BaseCrawler(ABC):
                 except Exception as e2:
                     logger.error(f"直连重试失败: {url}, 错误: {e2}")
                     return False
-            
+
             return False
 
     async def scroll_to_load(self, scroll_times: int = 3, delay: float = 1.5):

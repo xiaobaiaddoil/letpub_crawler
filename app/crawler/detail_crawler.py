@@ -59,6 +59,10 @@ class DetailCrawler(BaseCrawler):
     async def crawl(self, journal_id: int, validate: bool = True) -> Dict:
         """爬取期刊详情
 
+        流程：
+        1. 用代理（无 Cookie）爬取基本信息表格
+        2. 获取 Cookie，用同一代理爬取评论（httpx）
+
         Args:
             journal_id: 期刊ID
             validate: 是否校验数据完整性，默认为True
@@ -81,17 +85,31 @@ class DetailCrawler(BaseCrawler):
             "comments": []
         }
 
-        # 提取基本信息（表格结构）
+        # 提取基本信息（表格结构，无需 Cookie）
         detail["basic_info"] = await self._extract_basic_info()
 
         # 校验数据完整性
         if validate:
             self._validate_basic_info(detail["basic_info"], journal_id)
 
-        # 通过API提取评论（更高效）
-        comments, comment_info = await self._fetch_comments_from_api(journal_id)
+        # 获取 Cookie（优先从池，否则本地配置）
+        cookie_value = await self._get_cookie_from_pool()
+        if not cookie_value:
+            cookie_value = config.LETPUB_COOKIE or None
+            if cookie_value:
+                logger.info("[评论] 使用本地配置 Cookie 爬取评论")
+
+        if not cookie_value:
+            logger.warning(f"[评论] 期刊 {journal_id} 无可用 Cookie，跳过评论爬取")
+            detail["basic_info"]["comment_count"] = 0
+            detail["basic_info"]["comment_pages"] = 0
+            detail["basic_info"]["crawled_comment_count"] = 0
+            return detail
+
+        # 通过API提取评论（复用当前代理，带 Cookie）
+        comments, comment_info = await self._fetch_comments_from_api(journal_id, cookie_value)
         detail["comments"] = comments
-        
+
         # 将评论数量信息存入 basic_info
         detail["basic_info"]["comment_count"] = comment_info.get("total_count", 0)
         detail["basic_info"]["comment_pages"] = comment_info.get("total_pages", 0)
@@ -160,7 +178,7 @@ class DetailCrawler(BaseCrawler):
 
             # 查找主信息表格 - 通常是包含期刊详情的表格
             # 根据 LetPub 网站结构，表格每行第一列是key，第二列是value
-            table_main = self.page.locator('xpath=//*[@id="yxyz_content"]/table[4]')
+            table_main = self.page.locator('xpath=//*[@id="yxyz_content"]/table[3]')
             table_count = await table_main.count()
 
             for table_idx in range(table_count):
@@ -554,19 +572,20 @@ class DetailCrawler(BaseCrawler):
 
         return normalized
 
-    async def _fetch_comments_from_api(self, journal_id: int) -> tuple:
-        """通过AJAX API获取评论数据（更高效的方式）
+    async def _fetch_comments_from_api(self, journal_id: int, cookie_value: str) -> tuple:
+        """通过AJAX API获取评论数据。
 
-        使用浏览器初始化时获取的 Cookie（来自 Cookie 池或本地配置）
-        当检测到每页只有1条评论时，主动更换Cookie重试
-        
+        同一 journal_id 的所有评论页复用同一代理（self._current_proxy_info）。
+        Cookie 由调用方传入，不在此处重新获取。
+        当检测到每页只有1条评论时，主动更换Cookie重试。
+
         Returns:
             tuple: (comments列表, comment_info字典)
             comment_info包含: total_count(总评论数), total_pages(总页数), crawled_count(爬取数量)
         """
         comments = []
-        cookie_refresh_attempted = False  # 标记是否已尝试刷新Cookie
-        
+        cookie_refresh_attempted = False
+
         # 评论信息
         comment_info = {
             "total_count": 0,
@@ -580,47 +599,47 @@ class DetailCrawler(BaseCrawler):
             total_comments = int(comment_nums)
             page_size = 10
             total_pages = math.ceil(total_comments / page_size)
-            
+
             comment_info["total_count"] = total_comments
             comment_info["total_pages"] = total_pages
-            
+
             logger.info(f"期刊 {journal_id} 共有 {total_comments} 条评论，{total_pages} 页")
 
             # 评论API URL
             api_url = f"{config.BASE_URL}/journalappAjax_comments_center.php"
 
             page = 1
-            max_pages = total_pages  # 限制最大页数，防止无限循环
+            max_pages = total_pages
 
-            # 使用浏览器初始化时获取的 Cookie（已在基类中处理）
-            cookie_value = self.get_current_cookie_value()
-
-            # 决定请求方式：有cookie时用httpx，否则用浏览器
-            use_httpx = bool(cookie_value)
+            # Cookie 由调用方传入，始终用 httpx（同一代理贯穿所有评论页）
 
             while page <= max_pages:
                 # 构建请求参数
                 params = {
                     "action": "getdetailscommentslistflow",
                     "journalid": str(journal_id),
-                    "sorttype": "undefined",  # 或 "time", "rating" 等
+                    "sorttype": "undefined",
                     "page": str(page)
                 }
 
                 logger.info(f"获取评论第 {page} 页 (journal_id={journal_id})")
 
                 try:
-                    response_text = None
-
-                    if use_httpx:
-                        # 使用httpx发起请求（带自定义Cookie）
-                        response_text = await self._fetch_with_httpx(api_url, params, cookie_value)
-                    else:
-                        # 使用浏览器发起请求（使用浏览器Cookie）
-                        response_text = await self._fetch_with_browser(api_url, params)
+                    response_text = await self._fetch_with_httpx(api_url, params, cookie_value)
 
                     if not response_text:
                         logger.warning("获取评论响应为空")
+                        if page == 1 and max_pages > 1 and not cookie_refresh_attempted:
+                            logger.warning("[Cookie] 第1页响应为空，Cookie可能失效，尝试刷新")
+                            await self.report_cookie_result(success=False)
+                            new_cookie = await self._get_cookie_from_pool()
+                            cookie_refresh_attempted = True
+                            if new_cookie:
+                                logger.info("[Cookie] 已获取新Cookie，重新开始获取评论")
+                                cookie_value = new_cookie
+                                comments.clear()
+                                page = 1
+                                continue
                         break
 
                     # 解析JSON响应
@@ -629,6 +648,17 @@ class DetailCrawler(BaseCrawler):
                     # 检查响应状态
                     if data.get("code") != 0:
                         logger.warning(f"API返回错误: {data.get('msg', 'Unknown error')}")
+                        if page == 1 and max_pages > 1 and not cookie_refresh_attempted:
+                            logger.warning("[Cookie] 第1页API返回错误，Cookie可能失效，尝试刷新")
+                            await self.report_cookie_result(success=False)
+                            new_cookie = await self._get_cookie_from_pool()
+                            cookie_refresh_attempted = True
+                            if new_cookie:
+                                logger.info("[Cookie] 已获取新Cookie，重新开始获取评论")
+                                cookie_value = new_cookie
+                                comments.clear()
+                                page = 1
+                                continue
                         break
 
                     # 提取评论数据
@@ -636,9 +666,20 @@ class DetailCrawler(BaseCrawler):
 
                     if not comment_data:
                         logger.info(f"第 {page} 页无评论数据，停止获取")
+                        if page == 1 and max_pages > 1 and not cookie_refresh_attempted:
+                            logger.warning("[Cookie] 第1页无评论数据，Cookie可能失效，尝试刷新")
+                            await self.report_cookie_result(success=False)
+                            new_cookie = await self._get_cookie_from_pool()
+                            cookie_refresh_attempted = True
+                            if new_cookie:
+                                logger.info("[Cookie] 已获取新Cookie，重新开始获取评论")
+                                cookie_value = new_cookie
+                                comments.clear()
+                                page = 1
+                                continue
                         break
 
-                    # 解析每条评论  每条评论是一个div字符串需要处理
+                    # 解析每条评论
                     page_comments = []
                     for item in comment_data:
                         try:
@@ -655,18 +696,16 @@ class DetailCrawler(BaseCrawler):
                     # 检测Cookie失效：多页但每页只有1条数据
                     if len(page_comments) == 1 and max_pages > 1 and page == 1 and not cookie_refresh_attempted:
                         logger.warning(f"[Cookie] 检测到异常：多页({max_pages}页)但第1页只有1条数据，Cookie可能失效")
-                        
+
                         # 报告当前Cookie失败
                         await self.report_cookie_result(success=False)
-                        
+
                         # 尝试获取新Cookie
                         new_cookie = await self._get_cookie_from_pool()
                         if new_cookie:
-                            logger.info(f"[Cookie] 已获取新Cookie，重新开始获取评论")
+                            logger.info("[Cookie] 已获取新Cookie，重新开始获取评论")
                             cookie_value = new_cookie
-                            use_httpx = True  # 强制使用httpx（因为浏览器context中的cookie没更新）
                             cookie_refresh_attempted = True
-                            # 清空已获取的评论，重新开始
                             comments.clear()
                             page = 1
                             continue
@@ -682,11 +721,8 @@ class DetailCrawler(BaseCrawler):
 
                     page += 1
 
-                    # 评论API请求不需要延时
-
                 except json.JSONDecodeError as e:
                     logger.error(f"解析JSON失败: {e}")
-                    # 如果API不可用，降级使用页面爬取
                     logger.info("API获取失败，尝试从页面提取评论")
                     fallback_comments = await self._extract_comments()
                     comment_info["crawled_count"] = len(fallback_comments)
@@ -710,30 +746,30 @@ class DetailCrawler(BaseCrawler):
                     expected=total_comments,
                     actual=len(comments)
                 )
-            
+
             logger.info(f"通过API共获取 {len(comments)} 条评论 (页面显示: {total_comments} 条)")
 
         except Exception as e:
             logger.error(f"API获取评论失败: {e}")
-            # 记录错误
             record_problem(
                 journal_id=journal_id,
                 problem_type="error",
                 problem_code="comment_fetch_error",
                 message=str(e)
             )
-            # 降级使用页面爬取
-            logger.info("降级使用页面爬取方式")
-            fallback_comments = await self._extract_comments()
-            comment_info["crawled_count"] = len(fallback_comments)
-            return fallback_comments, comment_info
+            comment_info["crawled_count"] = 0
+            return [], comment_info
 
         return comments, comment_info
 
     async def _fetch_with_httpx(self, api_url: str, params: Dict, cookie_value: str) -> Optional[str]:
-        """使用httpx发起POST请求（带自定义Cookie），代理失败自动切换直连重试"""
+        """使用httpx发起POST请求（带自定义Cookie），复用当前代理（不切换）。
+
+        评论爬取要求同一 journal_id 所有页走同一代理，故此处不做代理切换。
+        代理失败直接返回 None，由上层决策。
+        """
         proxy_info = self.get_proxy_display()
-        
+
         # 构建Cookie字符串
         if "=" in cookie_value:
             cookie_header = cookie_value
@@ -750,10 +786,9 @@ class DetailCrawler(BaseCrawler):
             "Content-Length": "0"
         }
 
-        # 构建完整URL（参数放在URL中）
         url_with_params = f"{api_url}?action={params['action']}&journalid={params['journalid']}&sorttype={params['sorttype']}&page={params['page']}"
 
-        # 构建代理URL
+        # 构建代理URL（复用当前代理，不重新获取）
         proxy_url = None
         if self._current_proxy_info:
             p = self._current_proxy_info
@@ -770,87 +805,6 @@ class DetailCrawler(BaseCrawler):
 
         except Exception as e:
             logger.error(f"[API请求] httpx请求失败 [代理: {proxy_info}]: {e}")
-            
-            # 如果使用代理失败，尝试直连重试
-            if self._current_proxy_info and not self._using_direct:
-                logger.warning(f"[API请求] 代理 {proxy_info} 失败，切换直连重试...")
-                await self.report_proxy_result(success=False)
-                
-                try:
-                    async with httpx.AsyncClient(timeout=30.0) as client:
-                        response = await client.post(url_with_params, headers=headers, content="")
-                        logger.debug(f"[API请求] {url_with_params} [直连重试] -> {response.status_code}")
-                        return response.text
-                except Exception as e2:
-                    logger.error(f"[API请求] 直连重试失败: {e2}")
-                    return None
-            
-            return None
-
-    async def _fetch_with_browser(self, api_url: str, params: Dict) -> Optional[str]:
-        """使用浏览器发起POST请求（使用浏览器Cookie），代理失败自动切换直连重试"""
-        proxy_info = self.get_proxy_display()
-        try:
-            response = await self.page.evaluate('''async (args) => {
-                const url = new URL(args.url);
-                Object.keys(args.params).forEach(key =>
-                    url.searchParams.append(key, args.params[key])
-                );
-
-                const response = await fetch(url.toString(), {
-                    method: 'POST',
-                    credentials: 'include',
-                    headers: {
-                        'Accept': 'application/json, text/javascript, */*; q=0.01',
-                        'X-Requested-With': 'XMLHttpRequest',
-                        'Content-Length': '0'
-                    },
-                    body: ''
-                });
-                const text = await response.text();
-                return text;
-            }''', {"url": api_url, "params": params})
-            logger.debug(f"[API请求] 浏览器请求成功 [代理: {proxy_info}]")
-            return response
-        except Exception as e:
-            logger.error(f"[API请求] 浏览器请求失败 [代理: {proxy_info}]: {e}")
-            
-            # 如果使用代理失败，尝试切换直连重试
-            if self._current_proxy_info and not self._using_direct:
-                logger.warning(f"[API请求] 代理 {proxy_info} 失败，切换直连重试...")
-                await self.report_proxy_result(success=False)
-                
-                # 关闭当前浏览器，用直连重新初始化
-                await self.close()
-                await self.init_browser(use_proxy=False)
-                
-                # 直连重试
-                try:
-                    response = await self.page.evaluate('''async (args) => {
-                        const url = new URL(args.url);
-                        Object.keys(args.params).forEach(key =>
-                            url.searchParams.append(key, args.params[key])
-                        );
-
-                        const response = await fetch(url.toString(), {
-                            method: 'POST',
-                            credentials: 'include',
-                            headers: {
-                                'Accept': 'application/json, text/javascript, */*; q=0.01',
-                                'X-Requested-With': 'XMLHttpRequest',
-                                'Content-Length': '0'
-                            },
-                            body: ''
-                        });
-                        const text = await response.text();
-                        return text;
-                    }''', {"url": api_url, "params": params})
-                    logger.debug(f"[API请求] 浏览器直连重试成功")
-                    return response
-                except Exception as e2:
-                    logger.error(f"[API请求] 浏览器直连重试失败: {e2}")
-                    return None
-            
             return None
 
     def _parse_comment_from_api(self, journal_id:str,item: Dict) -> Optional[Dict]:

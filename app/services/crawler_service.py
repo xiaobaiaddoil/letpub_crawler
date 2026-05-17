@@ -13,6 +13,7 @@ from app.crawler.category_crawler import CategoryCrawler
 from app.crawler.list_crawler import ListCrawler
 from app.crawler.detail_crawler import DetailCrawler, DataValidationError
 from app.database import SessionLocal
+from app import config
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +169,7 @@ class CrawlerService:
     async def _process_list_tasks(self, db: Session, task_manager: TaskManager):
         """处理列表任务"""
         # 使用 acquire_tasks 原子性获取任务
-        tasks = task_manager.acquire_tasks(TaskType.LIST.value, limit=5)
+        tasks = task_manager.acquire_tasks(TaskType.LIST.value, limit=config.BATCH_SIZE)
 
         for task in tasks:
             if not self._running or self._paused:
@@ -221,7 +222,7 @@ class CrawlerService:
     async def _process_detail_tasks(self, db: Session, task_manager: TaskManager):
         """处理详情任务"""
         # 使用 acquire_tasks 原子性获取任务
-        tasks = task_manager.acquire_tasks(TaskType.DETAIL.value, limit=3)
+        tasks = task_manager.acquire_tasks(TaskType.DETAIL.value, limit=config.BATCH_SIZE)
 
         for task in tasks:
             if not self._running or self._paused:

@@ -151,7 +151,7 @@ class Config:
         return self._proxy_config
     
     # 目标网站
-    BASE_URL: str = "https://letpub.com.cn"
+    BASE_URL: str = "https://www.letpub.com.cn"
     
     @property
     def ENTRY_URL(self) -> str:
