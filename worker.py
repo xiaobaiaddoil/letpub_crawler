@@ -374,6 +374,8 @@ class DistributedWorker:
         sem = asyncio.Semaphore(config.PARALLEL_WORKERS)
         results = {"completed": 0, "failed": 0}
 
+        logger.info(f"[并行列表] 批次 {len(tasks)} 个任务，并发上限 {config.PARALLEL_WORKERS}")
+
         async def _run_one(task):
             if not self._running or self._paused:
                 return
@@ -381,12 +383,13 @@ class DistributedWorker:
             task_db = SessionLocal()
             try:
                 async with sem:
-                    crawler = ListCrawler()
-                    await crawler.init_browser()
-
                     extra = json.loads(task.extra_data) if task.extra_data else {}
                     field_tag = extra.get("field_tag")
                     page = extra.get("page", 1)
+                    logger.info(f"[并行列表] 开始 task={task.id} field={field_tag} page={page}")
+
+                    crawler = ListCrawler()
+                    await crawler.init_browser()
 
                     task_manager_local = TaskManager(task_db, self.worker_id)
                     task_manager_local.renew_task_lock(task)
@@ -421,6 +424,7 @@ class DistributedWorker:
                     await crawler.report_cookie_result(success=True)
                     await crawler.report_proxy_result(success=True)
                     results["completed"] += 1
+                    logger.info(f"[并行列表] 完成 task={task.id} field={field_tag} page={page}")
 
             except Exception as e:
                 task_db.rollback()
@@ -456,6 +460,8 @@ class DistributedWorker:
         sem = asyncio.Semaphore(config.PARALLEL_WORKERS)
         results = {"completed": 0, "failed": 0}
 
+        logger.info(f"[并行详情] 批次 {len(tasks)} 个任务，并发上限 {config.PARALLEL_WORKERS}")
+
         async def _run_one(task):
             if not self._running or self._paused:
                 return
@@ -463,11 +469,11 @@ class DistributedWorker:
             task_db = SessionLocal()
             try:
                 async with sem:
+                    journal_id = int(task.target_id)
+                    logger.info(f"[并行详情] 开始 task={task.id} journal_id={journal_id}")
+
                     crawler = DetailCrawler()
                     await crawler.init_browser()
-
-                    journal_id = int(task.target_id)
-                    task_manager_local = TaskManager(task_db, self.worker_id)
                     task_manager_local.renew_task_lock(task)
 
                     detail = await crawler.crawl(journal_id)
@@ -529,6 +535,7 @@ class DistributedWorker:
                     await crawler.report_cookie_result(success=True)
                     await crawler.report_proxy_result(success=True)
                     results["completed"] += 1
+                    logger.info(f"[并行详情] 完成 task={task.id} journal_id={journal_id}")
 
             except Exception as e:
                 task_db.rollback()
