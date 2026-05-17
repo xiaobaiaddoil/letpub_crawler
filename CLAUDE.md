@@ -24,6 +24,7 @@ RUN_MODE=master uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8999
+
 # Run worker node (crawler only)
 uv run python worker.py --worker-id worker-01
 
@@ -45,8 +46,24 @@ PostgreSQL (shared task queue)
        │   └── Web UI + Task API (no crawling)
        │
        └── Worker Nodes (worker.py)
-           └── Crawlers + Heartbeat
+           └── PARALLEL_WORKERS consumer coroutines + Heartbeat
 ```
+
+### Concurrency Model（消费者协程池）
+
+每个 Worker 节点启动 `crawler.parallel_workers`（默认3）个持久协程，各自独立循环：
+
+```
+_consumer_loop(N):
+  while running:
+    task = _acquire_next_task()   # CATEGORY → LIST → DETAIL 优先级
+    if task: execute(task)
+    else: sleep(5s)
+```
+
+- 任务去重：PostgreSQL `FOR UPDATE SKIP LOCKED`，多节点/多协程不会拿到同一任务
+- 无批次间隙：协程完成即拉下一个，不等其他协程
+- 日志前缀 `[消费者-N][类型]` 可区分各协程
 
 ### Task Flow
 
@@ -63,13 +80,12 @@ Category tasks → List tasks → Detail tasks (with comments)
 **Services** (`app/services/`):
 
 - `TaskManager`: Distributed task queue with `SELECT ... FOR UPDATE SKIP LOCKED`
-- `CrawlerService`: Orchestrates crawlers in standalone mode
+- `CrawlerService`: Orchestrates crawlers in standalone mode（消费者协程池）
 
 **Models** (`app/models/`):
-端口触
 
 - `CrawlTask`: Task queue with worker_id, locked_at for distributed locking
-- `Worker`: Tracks worker nodes (heartbeat, status)
+- `Worker`: Tracks worker nodes (heartbeat, status, current_task_count)
 - `Journal`, `Category`, `Comment`: Data storage
 
 ### Task Locking Mechanism
@@ -78,7 +94,7 @@ Tasks use PostgreSQL row-level locking to prevent duplicate crawling:
 
 1. `acquire_tasks()` uses `FOR UPDATE SKIP LOCKED` to atomically claim tasks
 2. `TASK_LOCK_TIMEOUT` releases stuck tasks automatically
-3. Workers send heartbeats; offline workers' tasks get released
+3. Workers send heartbeats; `current_task_count` derived from DB query (not manual counter)
 
 ### Configuration (`config/app.yaml`)
 
@@ -90,6 +106,8 @@ Key settings:
 - `database`: PostgreSQL connection (shared by all nodes)
 - `distributed.worker_id`: Unique identifier for worker nodes
 - `distributed.task_lock_timeout`: Seconds before stuck tasks are released (default: 600)
+- `crawler.parallel_workers`: 每节点消费者协程数（default: 3）
+- `crawler.batch_size`: 已废弃，消费者模式每次拉取1个任务，保留仅为配置兼容
 - `clash`: 本机 Clash Verge 代理池接入（见 `docs/clash-proxy-pool.md`）
 
 ### Clash 本机代理池
