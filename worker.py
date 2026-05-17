@@ -361,7 +361,7 @@ class DistributedWorker:
             await self.update_task_count(0)
 
     async def _process_list_tasks(self, db, task_manager: TaskManager):
-        """处理列表任务"""
+        """处理列表任务 - 并行执行"""
         from app.crawler.list_crawler import ListCrawler
         from app.models.category import Category
         from app.models.journal import Journal
@@ -371,38 +371,34 @@ class DistributedWorker:
             return
 
         await self.update_task_count(len(tasks))
-        completed = 0
-        failed = 0
+        sem = asyncio.Semaphore(config.PARALLEL_WORKERS)
+        results = {"completed": 0, "failed": 0}
 
-        # 浏览器实例移到循环外部，批量任务复用
-        crawler = None
-        try:
-            crawler = ListCrawler()
-            await crawler.init_browser()
+        async def _run_one(task):
+            if not self._running or self._paused:
+                return
+            crawler = None
+            task_db = SessionLocal()
+            try:
+                async with sem:
+                    crawler = ListCrawler()
+                    await crawler.init_browser()
 
-            for task in tasks:
-                if not self._running or self._paused:
-                    break
-
-                try:
                     extra = json.loads(task.extra_data) if task.extra_data else {}
                     field_tag = extra.get("field_tag")
                     page = extra.get("page", 1)
 
-                    # 续期任务锁定时间
-                    task_manager.renew_task_lock(task)
+                    task_manager_local = TaskManager(task_db, self.worker_id)
+                    task_manager_local.renew_task_lock(task)
 
-                    category = db.query(Category).filter(
+                    category = task_db.query(Category).filter(
                         Category.field_tag == field_tag
                     ).first()
-
-                    # 确保浏览器可用
-                    await crawler.ensure_browser()
 
                     journals = await crawler.crawl(field_tag, page)
 
                     for j_data in journals:
-                        journal = db.query(Journal).filter(
+                        journal = task_db.query(Journal).filter(
                             Journal.journal_id == j_data["journal_id"]
                         ).first()
 
@@ -412,48 +408,42 @@ class DistributedWorker:
                                 name=j_data["name"],
                                 category_id=category.id if category else None
                             )
-                            db.add(journal)
-                            db.commit()
-                            db.refresh(journal)
+                            task_db.add(journal)
+                            task_db.commit()
+                            task_db.refresh(journal)
 
-                            task_manager.create_detail_task(
+                            task_manager_local.create_detail_task(
                                 j_data["journal_id"],
                                 category.id if category else None
                             )
 
-                    task_manager.complete_task(task)
-                    # 报告 Cookie 和代理使用成功
+                    task_manager_local.complete_task(task)
                     await crawler.report_cookie_result(success=True)
                     await crawler.report_proxy_result(success=True)
-                    completed += 1
+                    results["completed"] += 1
 
-                except Exception as e:
-                    db.rollback()
-                    error_msg = str(e)
-                    logger.exception(f"处理列表任务失败: {task.target_id}")
-                    
-                    # 保存失败页面的HTML
-                    await self._save_failed_html(crawler, task.target_id, error_msg)
-                    
-                    task_manager.fail_task(task, error_msg)
-                    # 报告 Cookie 和代理使用失败
-                    if crawler:
-                        await crawler.report_cookie_result(success=False)
-                        await crawler.report_proxy_result(success=False)
-                    failed += 1
-                    
-                    # 如果是直连失败，休眠20秒
-                    await self._handle_request_failure(crawler)
+            except Exception as e:
+                task_db.rollback()
+                error_msg = str(e)
+                logger.exception(f"处理列表任务失败: {task.target_id}")
+                await self._save_failed_html(crawler, task.target_id, error_msg)
+                TaskManager(task_db, self.worker_id).fail_task(task, error_msg)
+                if crawler:
+                    await crawler.report_cookie_result(success=False)
+                    await crawler.report_proxy_result(success=False)
+                results["failed"] += 1
+                await self._handle_request_failure(crawler)
+            finally:
+                if crawler:
+                    await crawler.close()
+                task_db.close()
 
-        finally:
-            if crawler:
-                await crawler.close()
-
-        await self.increment_stats(completed=completed, failed=failed)
+        await asyncio.gather(*[_run_one(t) for t in tasks])
+        await self.increment_stats(completed=results["completed"], failed=results["failed"])
         await self.update_task_count(0)
 
     async def _process_detail_tasks(self, db, task_manager: TaskManager):
-        """处理详情任务"""
+        """处理详情任务 - 并行执行"""
         from app.crawler.detail_crawler import DetailCrawler
         from app.models.journal import Journal
         from app.models.comment import Comment
@@ -463,31 +453,26 @@ class DistributedWorker:
             return
 
         await self.update_task_count(len(tasks))
-        completed = 0
-        failed = 0
+        sem = asyncio.Semaphore(config.PARALLEL_WORKERS)
+        results = {"completed": 0, "failed": 0}
 
-        # 浏览器实例移到循环外部，批量任务复用
-        crawler = None
-        try:
-            crawler = DetailCrawler()
-            await crawler.init_browser()
+        async def _run_one(task):
+            if not self._running or self._paused:
+                return
+            crawler = None
+            task_db = SessionLocal()
+            try:
+                async with sem:
+                    crawler = DetailCrawler()
+                    await crawler.init_browser()
 
-            for task in tasks:
-                if not self._running or self._paused:
-                    break
-
-                try:
                     journal_id = int(task.target_id)
-
-                    # 续期任务锁定时间，防止长时间任务被误判为超时
-                    task_manager.renew_task_lock(task)
-
-                    # 确保浏览器可用
-                    await crawler.ensure_browser()
+                    task_manager_local = TaskManager(task_db, self.worker_id)
+                    task_manager_local.renew_task_lock(task)
 
                     detail = await crawler.crawl(journal_id)
 
-                    journal = db.query(Journal).filter(
+                    journal = task_db.query(Journal).filter(
                         Journal.journal_id == journal_id
                     ).first()
 
@@ -496,7 +481,6 @@ class DistributedWorker:
                         journal.issn = basic_info.get("issn", journal.issn)
                         journal.eissn = basic_info.get("E-ISSN")
 
-                        # 数值字段需要清洗，防止无效值（如"-"）导致数据库错误
                         journal.impact_factor = clean_numeric_value(basic_info.get("impact_factor")) or journal.impact_factor
                         journal.impact_factor_realtime = clean_numeric_value(basic_info.get("impact_factor_realtime"))
                         journal.self_citation_rate = basic_info.get("self_citation_rate")
@@ -511,12 +495,11 @@ class DistributedWorker:
 
                         journal.detail_data = basic_info
                         journal.detail_crawled = True
-                        db.commit()  # 先提交期刊信息
+                        task_db.commit()
 
-                        # 批量处理评论，使用 ON CONFLICT DO NOTHING
                         seen_comment_ids = set()
                         comments_to_insert = []
-                        
+
                         for c_data in detail.get("comments", []):
                             comment_id = c_data.get("comment_id")
                             if not comment_id or comment_id in seen_comment_ids:
@@ -531,47 +514,40 @@ class DistributedWorker:
                                 "submit_experience": c_data.get("submit_experience"),
                                 "comment_time": c_data.get("comment_time")
                             })
-                        
-                        # 批量插入，忽略冲突
+
                         if comments_to_insert:
                             from sqlalchemy.dialects.postgresql import insert
                             stmt = insert(Comment).values(comments_to_insert)
                             stmt = stmt.on_conflict_do_nothing(index_elements=['comment_id'])
-                            db.execute(stmt)
-                            db.commit()
+                            task_db.execute(stmt)
+                            task_db.commit()
 
                         journal.comments_crawled = True
-                        db.commit()
+                        task_db.commit()
 
-                    task_manager.complete_task(task)
-                    # 报告 Cookie 和代理使用成功
+                    task_manager_local.complete_task(task)
                     await crawler.report_cookie_result(success=True)
                     await crawler.report_proxy_result(success=True)
-                    completed += 1
+                    results["completed"] += 1
 
-                except Exception as e:
-                    db.rollback()
-                    error_msg = str(e)
-                    logger.exception(f"处理详情任务失败: {task.target_id}")
-                    
-                    # 保存失败页面的HTML
-                    await self._save_failed_html(crawler, task.target_id, error_msg)
-                    
-                    task_manager.fail_task(task, error_msg)
-                    # 报告 Cookie 和代理使用失败
-                    if crawler:
-                        await crawler.report_cookie_result(success=False)
-                        await crawler.report_proxy_result(success=False)
-                    failed += 1
-                    
-                    # 如果是直连失败，休眠20秒
-                    await self._handle_request_failure(crawler)
+            except Exception as e:
+                task_db.rollback()
+                error_msg = str(e)
+                logger.exception(f"处理详情任务失败: {task.target_id}")
+                await self._save_failed_html(crawler, task.target_id, error_msg)
+                TaskManager(task_db, self.worker_id).fail_task(task, error_msg)
+                if crawler:
+                    await crawler.report_cookie_result(success=False)
+                    await crawler.report_proxy_result(success=False)
+                results["failed"] += 1
+                await self._handle_request_failure(crawler)
+            finally:
+                if crawler:
+                    await crawler.close()
+                task_db.close()
 
-        finally:
-            if crawler:
-                await crawler.close()
-
-        await self.increment_stats(completed=completed, failed=failed)
+        await asyncio.gather(*[_run_one(t) for t in tasks])
+        await self.increment_stats(completed=results["completed"], failed=results["failed"])
         await self.update_task_count(0)
 
     async def _retry_failed_tasks(self, db, task_manager: TaskManager):

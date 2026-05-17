@@ -167,146 +167,147 @@ class CrawlerService:
             task_manager.fail_task(task, str(e))
 
     async def _process_list_tasks(self, db: Session, task_manager: TaskManager):
-        """处理列表任务"""
-        # 使用 acquire_tasks 原子性获取任务
+        """处理列表任务 - 并行执行"""
         tasks = task_manager.acquire_tasks(TaskType.LIST.value, limit=config.BATCH_SIZE)
+        if not tasks:
+            return
 
-        for task in tasks:
+        sem = asyncio.Semaphore(config.PARALLEL_WORKERS)
+
+        async def _run_one(task):
             if not self._running or self._paused:
-                break
-
-            # 任务已在 acquire_tasks 中被标记为 RUNNING
-
+                return
+            task_db = SessionLocal()
             try:
-                extra = json.loads(task.extra_data) if task.extra_data else {}
-                field_tag = extra.get("field_tag")
-                page = extra.get("page", 1)
+                async with sem:
+                    extra = json.loads(task.extra_data) if task.extra_data else {}
+                    field_tag = extra.get("field_tag")
+                    page = extra.get("page", 1)
 
-                # 获取分类ID
-                category = db.query(Category).filter(
-                    Category.field_tag == field_tag
-                ).first()
-
-                async with ListCrawler() as crawler:
-                    journals = await crawler.crawl(field_tag, page)
-
-                    for j_data in journals:
-                        # 保存期刊（如果不存在）
-                        journal = db.query(Journal).filter(
-                            Journal.journal_id == j_data["journal_id"]
-                        ).first()
-
-                        if not journal:
-                            journal = Journal(
-                                journal_id=j_data["journal_id"],
-                                name=j_data["name"],
-                                category_id=category.id if category else None
-                            )
-                            db.add(journal)
-                            db.commit()
-                            db.refresh(journal)
-
-                            # 创建详情任务
-                            task_manager.create_detail_task(
-                                j_data["journal_id"],
-                                category.id if category else None
-                            )
-
-                task_manager.complete_task(task)
-
-            except Exception as e:
-                db.rollback()  # 回滚事务
-                logger.exception(f"处理列表任务失败")
-                task_manager.fail_task(task, str(e))
-
-    async def _process_detail_tasks(self, db: Session, task_manager: TaskManager):
-        """处理详情任务"""
-        # 使用 acquire_tasks 原子性获取任务
-        tasks = task_manager.acquire_tasks(TaskType.DETAIL.value, limit=config.BATCH_SIZE)
-
-        for task in tasks:
-            if not self._running or self._paused:
-                break
-
-            # 任务已在 acquire_tasks 中被标记为 RUNNING
-
-            try:
-                journal_id = int(task.target_id)
-
-                async with DetailCrawler() as crawler:
-                    detail = await crawler.crawl(journal_id)
-
-                    # 更新期刊信息
-                    journal = db.query(Journal).filter(
-                        Journal.journal_id == journal_id
+                    category = task_db.query(Category).filter(
+                        Category.field_tag == field_tag
                     ).first()
 
-                    if journal:
-                        basic_info = detail.get("basic_info", {})
-                        # journal.name = basic_info.get("name", journal.name)
-                        journal.issn = basic_info.get("issn", journal.issn)
-                        journal.eissn = basic_info.get("E-ISSN")
+                    async with ListCrawler() as crawler:
+                        journals = await crawler.crawl(field_tag, page)
 
-                        # 影响因子相关
-                        journal.impact_factor = basic_info.get("impact_factor", journal.impact_factor)
-                        journal.impact_factor_realtime = basic_info.get("impact_factor_realtime")
-                        journal.self_citation_rate = basic_info.get("self_citation_rate")
+                        for j_data in journals:
+                            journal = task_db.query(Journal).filter(
+                                Journal.journal_id == j_data["journal_id"]
+                            ).first()
 
-                        # 分区和评分
-                        journal.jcr_partition = basic_info.get("jcr_partition")
-                        journal.cas_partition = basic_info.get("cas_partition")
-                        journal.cas_warning = basic_info.get("cas_warning")
-                        journal.citescore = basic_info.get("citescore")
+                            if not journal:
+                                journal = Journal(
+                                    journal_id=j_data["journal_id"],
+                                    name=j_data["name"],
+                                    category_id=category.id if category else None
+                                )
+                                task_db.add(journal)
+                                task_db.commit()
+                                task_db.refresh(journal)
 
-                        # 审稿相关
-                        journal.review_speed = basic_info.get("review_speed")
-                        journal.acceptance_rate = basic_info.get("acceptance_rate")
+                                TaskManager(task_db, self.worker_id).create_detail_task(
+                                    j_data["journal_id"],
+                                    category.id if category else None
+                                )
 
-                        # 存储完整详情数据（SQLAlchemy会自动处理dict到JSONB的转换）
-                        journal.detail_data = basic_info
-                        journal.detail_crawled = True
-
-                        # 批量处理评论，使用 ON CONFLICT DO NOTHING
-                        seen_comment_ids = set()
-                        comments_to_insert = []
-                        
-                        for c_data in detail.get("comments", []):
-                            comment_id = c_data.get("comment_id")
-                            if not comment_id or comment_id in seen_comment_ids:
-                                continue
-                            seen_comment_ids.add(comment_id)
-                            comments_to_insert.append({
-                                "journal_id": journal.journal_id,
-                                "comment_id": comment_id,
-                                "content": c_data.get("content"),
-                                "author": c_data.get("author"),
-                                "rating": c_data.get("rating"),
-                                "submit_experience": c_data.get("submit_experience"),
-                                "comment_time": c_data.get("comment_time")
-                            })
-                        
-                        if comments_to_insert:
-                            from sqlalchemy.dialects.postgresql import insert
-                            stmt = insert(Comment).values(comments_to_insert)
-                            stmt = stmt.on_conflict_do_nothing(index_elements=['comment_id'])
-                            db.execute(stmt)
-
-                        journal.comments_crawled = True
-                        db.commit()
-
-                task_manager.complete_task(task)
-
-            except DataValidationError as e:
-                # 数据校验失败 - 任务标记为失败，可重试
-                db.rollback()
-                error_msg = f"数据校验失败: {str(e)}, 提取字段数: {e.extracted_fields}, 缺失字段: {e.missing_fields}"
-                logger.warning(f"期刊 {task.target_id} {error_msg}")
-                task_manager.fail_task(task, error_msg)
+                    TaskManager(task_db, self.worker_id).complete_task(task)
 
             except Exception as e:
-                db.rollback()  # 回滚事务
+                task_db.rollback()
+                logger.exception(f"处理列表任务失败")
+                TaskManager(task_db, self.worker_id).fail_task(task, str(e))
+            finally:
+                task_db.close()
+
+        await asyncio.gather(*[_run_one(t) for t in tasks])
+
+    async def _process_detail_tasks(self, db: Session, task_manager: TaskManager):
+        """处理详情任务 - 并行执行"""
+        tasks = task_manager.acquire_tasks(TaskType.DETAIL.value, limit=config.BATCH_SIZE)
+        if not tasks:
+            return
+
+        sem = asyncio.Semaphore(config.PARALLEL_WORKERS)
+
+        async def _run_one(task):
+            if not self._running or self._paused:
+                return
+            task_db = SessionLocal()
+            try:
+                async with sem:
+                    journal_id = int(task.target_id)
+
+                    async with DetailCrawler() as crawler:
+                        detail = await crawler.crawl(journal_id)
+
+                        journal = task_db.query(Journal).filter(
+                            Journal.journal_id == journal_id
+                        ).first()
+
+                        if journal:
+                            basic_info = detail.get("basic_info", {})
+                            journal.issn = basic_info.get("issn", journal.issn)
+                            journal.eissn = basic_info.get("E-ISSN")
+
+                            journal.impact_factor = basic_info.get("impact_factor", journal.impact_factor)
+                            journal.impact_factor_realtime = basic_info.get("impact_factor_realtime")
+                            journal.self_citation_rate = basic_info.get("self_citation_rate")
+
+                            journal.jcr_partition = basic_info.get("jcr_partition")
+                            journal.cas_partition = basic_info.get("cas_partition")
+                            journal.cas_warning = basic_info.get("cas_warning")
+                            journal.citescore = basic_info.get("citescore")
+
+                            journal.review_speed = basic_info.get("review_speed")
+                            journal.acceptance_rate = basic_info.get("acceptance_rate")
+
+                            journal.detail_data = basic_info
+                            journal.detail_crawled = True
+
+                            seen_comment_ids = set()
+                            comments_to_insert = []
+
+                            for c_data in detail.get("comments", []):
+                                comment_id = c_data.get("comment_id")
+                                if not comment_id or comment_id in seen_comment_ids:
+                                    continue
+                                seen_comment_ids.add(comment_id)
+                                comments_to_insert.append({
+                                    "journal_id": journal.journal_id,
+                                    "comment_id": comment_id,
+                                    "content": c_data.get("content"),
+                                    "author": c_data.get("author"),
+                                    "rating": c_data.get("rating"),
+                                    "submit_experience": c_data.get("submit_experience"),
+                                    "comment_time": c_data.get("comment_time")
+                                })
+
+                            if comments_to_insert:
+                                from sqlalchemy.dialects.postgresql import insert
+                                stmt = insert(Comment).values(comments_to_insert)
+                                stmt = stmt.on_conflict_do_nothing(index_elements=['comment_id'])
+                                task_db.execute(stmt)
+
+                            journal.comments_crawled = True
+                            task_db.commit()
+
+                    TaskManager(task_db, self.worker_id).complete_task(task)
+
+            except DataValidationError as e:
+                task_db.rollback()
+                error_msg = f"数据校验失败: {str(e)}, 提取字段数: {e.extracted_fields}, 缺失字段: {e.missing_fields}"
+                logger.warning(f"期刊 {task.target_id} {error_msg}")
+                TaskManager(task_db, self.worker_id).fail_task(task, error_msg)
+
+            except Exception as e:
+                task_db.rollback()
                 logger.exception(f"处理详情任务失败 (journal_id={task.target_id})")
-                task_manager.fail_task(task, str(e))
+                TaskManager(task_db, self.worker_id).fail_task(task, str(e))
+            finally:
+                task_db.close()
+
+        await asyncio.gather(*[_run_one(t) for t in tasks])
 
     async def _retry_failed_tasks(self, db: Session, task_manager: TaskManager):
         """重试失败任务"""

@@ -79,6 +79,10 @@ class Config:
     @property
     def BATCH_SIZE(self) -> int:
         return int(get_nested(self._app_config, "crawler", "batch_size", default=5))
+
+    @property
+    def PARALLEL_WORKERS(self) -> int:
+        return int(get_nested(self._app_config, "crawler", "parallel_workers", default=3))
     
     @property
     def WORKER_ID(self) -> str:
