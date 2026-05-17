@@ -30,7 +30,8 @@ crawler:
   delay_min: 3 # 请求最小延迟（秒）
   delay_max: 8 # 请求最大延迟（秒）
   max_retry: 3 # 任务最大重试次数
-  batch_size: 5 # 每次获取任务数量
+  batch_size: 5 # 已废弃，消费者模式每次拉取1个任务，保留仅为配置兼容
+  parallel_workers: 3 # 每节点消费者协程数（同时爬取的任务数）
 
 # 分布式配置
 distributed:
