@@ -173,6 +173,7 @@ class CrawlerService:
             return
 
         sem = asyncio.Semaphore(config.PARALLEL_WORKERS)
+        logger.info(f"[并行列表] 批次 {len(tasks)} 个任务，并发上限 {config.PARALLEL_WORKERS}")
 
         async def _run_one(task):
             if not self._running or self._paused:
@@ -183,6 +184,7 @@ class CrawlerService:
                     extra = json.loads(task.extra_data) if task.extra_data else {}
                     field_tag = extra.get("field_tag")
                     page = extra.get("page", 1)
+                    logger.info(f"[并行列表] 开始 task={task.id} field={field_tag} page={page}")
 
                     category = task_db.query(Category).filter(
                         Category.field_tag == field_tag
@@ -212,6 +214,7 @@ class CrawlerService:
                                 )
 
                     TaskManager(task_db, self.worker_id).complete_task(task)
+                    logger.info(f"[并行列表] 完成 task={task.id} field={field_tag} page={page}")
 
             except Exception as e:
                 task_db.rollback()
@@ -229,6 +232,7 @@ class CrawlerService:
             return
 
         sem = asyncio.Semaphore(config.PARALLEL_WORKERS)
+        logger.info(f"[并行详情] 批次 {len(tasks)} 个任务，并发上限 {config.PARALLEL_WORKERS}")
 
         async def _run_one(task):
             if not self._running or self._paused:
@@ -237,6 +241,7 @@ class CrawlerService:
             try:
                 async with sem:
                     journal_id = int(task.target_id)
+                    logger.info(f"[并行详情] 开始 task={task.id} journal_id={journal_id}")
 
                     async with DetailCrawler() as crawler:
                         detail = await crawler.crawl(journal_id)
@@ -293,6 +298,7 @@ class CrawlerService:
                             task_db.commit()
 
                     TaskManager(task_db, self.worker_id).complete_task(task)
+                    logger.info(f"[并行详情] 完成 task={task.id} journal_id={journal_id}")
 
             except DataValidationError as e:
                 task_db.rollback()
