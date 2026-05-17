@@ -78,6 +78,7 @@ class Config:
     
     @property
     def BATCH_SIZE(self) -> int:
+        # Deprecated: consumer pool uses limit=1 per coroutine; kept for config compatibility
         return int(get_nested(self._app_config, "crawler", "batch_size", default=5))
 
     @property
