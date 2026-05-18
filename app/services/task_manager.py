@@ -243,37 +243,45 @@ class TaskManager:
     def complete_task(self, task: CrawlTask):
         """完成任务"""
         now = get_utc_now()
-        task.status = TaskStatus.COMPLETED.value
-        task.completed_at = now
-        task.locked_at = None  # 清除锁定时间
+        self.db.query(CrawlTask).filter(CrawlTask.id == task.id).update({
+            CrawlTask.status: TaskStatus.COMPLETED.value,
+            CrawlTask.completed_at: now,
+            CrawlTask.locked_at: None,
+        }, synchronize_session=False)
         self.db.commit()
         logger.info(f"完成任务: {task.id} by {self.worker_id}")
 
     def renew_task_lock(self, task: CrawlTask):
         """续期任务锁定时间（防止长时间任务被误判为超时）"""
         now = get_utc_now()
-        task.locked_at = now
+        self.db.query(CrawlTask).filter(CrawlTask.id == task.id).update({
+            CrawlTask.locked_at: now,
+        }, synchronize_session=False)
         self.db.commit()
         logger.debug(f"续期任务锁: {task.id}")
 
     def fail_task(self, task: CrawlTask, error: str):
         """任务失败"""
         now = get_utc_now()
-        task.status = TaskStatus.FAILED.value
-        task.retry_count += 1
-        task.error_message = error
-        task.completed_at = now
-        task.locked_at = None  # 清除锁定时间
+        self.db.query(CrawlTask).filter(CrawlTask.id == task.id).update({
+            CrawlTask.status: TaskStatus.FAILED.value,
+            CrawlTask.retry_count: CrawlTask.retry_count + 1,
+            CrawlTask.error_message: error,
+            CrawlTask.completed_at: now,
+            CrawlTask.locked_at: None,
+        }, synchronize_session=False)
         self.db.commit()
         logger.error(f"任务失败: {task.id}, 错误: {error}, worker: {self.worker_id}")
 
     def retry_task(self, task: CrawlTask):
         """重试任务"""
         if task.retry_count < task.max_retry:
-            task.status = TaskStatus.PENDING.value
-            task.error_message = None
-            task.worker_id = None  # 清除worker标识
-            task.locked_at = None  # 清除锁定时间
+            self.db.query(CrawlTask).filter(CrawlTask.id == task.id).update({
+                CrawlTask.status: TaskStatus.PENDING.value,
+                CrawlTask.error_message: None,
+                CrawlTask.worker_id: None,
+                CrawlTask.locked_at: None,
+            }, synchronize_session=False)
             self.db.commit()
             logger.info(f"重试任务: {task.id}")
             return True
