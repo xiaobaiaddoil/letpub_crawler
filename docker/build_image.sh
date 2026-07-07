@@ -49,14 +49,17 @@ case "$BUILD_TARGET" in
     build_one web "$WEB_IMAGE"
     ;;
   worker)
+    build_one worker-slim "$WORKER_IMAGE"
+    ;;
+  worker-playwright)
     build_one worker "$WORKER_IMAGE"
     ;;
   all)
     build_one web "$WEB_IMAGE"
-    build_one worker "$WORKER_IMAGE"
+    build_one worker-slim "$WORKER_IMAGE"
     ;;
   *)
-    echo "BUILD_TARGET must be web, worker, or all" >&2
+    echo "BUILD_TARGET must be web, worker, worker-playwright, or all" >&2
     exit 2
     ;;
 esac

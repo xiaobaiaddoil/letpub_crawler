@@ -8,7 +8,7 @@ WORK_DIR="${WORK_DIR:-/tmp/letpub_pg_migration}"
 OLD_CONTAINER="${OLD_CONTAINER:-letpub-old-postgres-export}"
 DUMP_FILE="${DUMP_FILE:-$WORK_DIR/letpub_old.dump}"
 TARGET_SERVICE="${TARGET_SERVICE:-db}"
-POSTGRES_DATA_DIR="${POSTGRES_DATA_DIR:-/home/cc/database/letpub_crawler/postgres}"
+POSTGRES_DATA_DIR="${POSTGRES_DATA_DIR:-/home/cc/database/letpub_crawler_v2/postgres}"
 
 if [ -f "$PROJECT_DIR/.env" ]; then
   set -a
@@ -17,7 +17,7 @@ if [ -f "$PROJECT_DIR/.env" ]; then
   set +a
 fi
 
-POSTGRES_DB="${POSTGRES_DB:-${DB_NAME:-letpub_crawler}}"
+POSTGRES_DB="${POSTGRES_DB:-${DB_NAME:-letpub_crawler_v2}}"
 POSTGRES_USER="${POSTGRES_USER:-${DB_USER:-letpub}}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-${DB_PASSWORD:-letpub_password}}"
 RESET_TARGET="${RESET_TARGET:-1}"

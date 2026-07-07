@@ -5,14 +5,14 @@ services:
     image: postgres:18-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-${DB_NAME:-letpub_crawler}}
+      POSTGRES_DB: ${POSTGRES_DB:-${DB_NAME:-letpub_crawler_v2}}
       POSTGRES_USER: ${POSTGRES_USER:-${DB_USER:-letpub}}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-${DB_PASSWORD:-letpub_password}}
       TZ: ${TZ:-Asia/Shanghai}
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-15432}:5432"
     volumes:
-      - ${POSTGRES_DATA_DIR:-/home/cc/database/letpub_crawler/postgres}:/var/lib/postgresql
+      - ${POSTGRES_DATA_DIR:-/home/cc/database/letpub_crawler_v2/postgres}:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 10s
@@ -41,7 +41,7 @@ services:
       PORT: 8000
       RUN_MODE: ${RUN_MODE:-master}
       CRAWLER_AUTO_START: ${CRAWLER_AUTO_START:-false}
-      DATABASE_URL: postgresql://${POSTGRES_USER:-${DB_USER:-letpub}}:${POSTGRES_PASSWORD:-${DB_PASSWORD:-letpub_password}}@db:5432/${POSTGRES_DB:-${DB_NAME:-letpub_crawler}}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-${DB_USER:-letpub}}:${POSTGRES_PASSWORD:-${DB_PASSWORD:-letpub_password}}@db:5432/${POSTGRES_DB:-${DB_NAME:-letpub_crawler_v2}}
       CRAWL_DELAY_MIN: ${CRAWL_DELAY_MIN:-3}
       CRAWL_DELAY_MAX: ${CRAWL_DELAY_MAX:-8}
       MAX_RETRY: ${MAX_RETRY:-3}
@@ -69,7 +69,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      target: worker
+      target: ${WORKER_BUILD_TARGET:-worker-slim}
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-public.ecr.aws/docker/library/python:3.12-slim}
         PLAYWRIGHT_BASE_IMAGE: ${PLAYWRIGHT_BASE_IMAGE:-mcr.microsoft.com/playwright/python:v1.57.0-noble}
@@ -87,7 +87,7 @@ services:
       DEBUG: ${DEBUG:-false}
       CONSOLE_LOG_LEVEL: ${CONSOLE_LOG_LEVEL:-INFO}
       RUN_MODE: worker
-      DATABASE_URL: postgresql://${POSTGRES_USER:-${DB_USER:-letpub}}:${POSTGRES_PASSWORD:-${DB_PASSWORD:-letpub_password}}@db:5432/${POSTGRES_DB:-${DB_NAME:-letpub_crawler}}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-${DB_USER:-letpub}}:${POSTGRES_PASSWORD:-${DB_PASSWORD:-letpub_password}}@db:5432/${POSTGRES_DB:-${DB_NAME:-letpub_crawler_v2}}
       MASTER_URL: ${MASTER_URL:-http://app:8000}
       WORKER_ID: ${LOCAL_WORKER_ID:-${CRAWLER_WORKER_ID:-}}
       CRAWL_DELAY_MIN: ${CRAWL_DELAY_MIN:-3}
@@ -99,7 +99,7 @@ services:
       WORKER_TIMEOUT: ${WORKER_TIMEOUT:-120}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
       LETPUB_COOKIE: ${LETPUB_COOKIE:-}
-      PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: ${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}
+      PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: ${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-/usr/bin/chromium-headless-shell}
     volumes:
       - ./logs:/app/logs
       - ./config:/app/config:ro

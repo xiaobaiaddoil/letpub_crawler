@@ -66,4 +66,21 @@ ENTRYPOINT ["/entrypoint.sh"]
 CMD ["worker"]
 
 
+FROM web AS worker-slim
+
+ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium-headless-shell
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    --mount=type=cache,target=/root/.cache/uv \
+    apt-get update \
+    && apt-get install -y --no-install-recommends \
+        chromium-headless-shell \
+        fonts-noto-cjk \
+    && uv sync --frozen --no-dev --no-install-project --extra crawler \
+    && rm -rf /var/lib/apt/lists/*
+
+CMD ["worker"]
+
+
 FROM web AS runtime

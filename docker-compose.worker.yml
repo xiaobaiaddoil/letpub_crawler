@@ -21,7 +21,7 @@ services:
       WORKER_TIMEOUT: ${WORKER_TIMEOUT:-120}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
       LETPUB_COOKIE: ${LETPUB_COOKIE:-}
-      PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: ${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}
+      PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: ${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-/usr/bin/chromium-headless-shell}
     volumes:
       - ./logs:/app/logs
       - ./config:/app/config:ro
