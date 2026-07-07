@@ -59,6 +59,7 @@ backups/
 *.tar
 *.tar.gz
 *.sha256
+t.json
 
 # Playwright
 playwright-report/
