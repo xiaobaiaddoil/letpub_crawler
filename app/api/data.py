@@ -2,11 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
-from typing import List, Optional
+from typing import Any, List, Optional
 from pydantic import BaseModel
 from datetime import datetime
 import csv
 import io
+import json
 from app.database import get_db
 from app.models.category import Category
 from app.models.journal import Journal
@@ -43,13 +44,18 @@ class JournalResponse(BaseModel):
     comments_crawled: bool
     category_id: Optional[int]
     created_at: datetime
+    comment_count: int = 0
+    jcr_partition_summary: Optional[str] = None
+    cas_partition_summary: Optional[str] = None
+    citescore_summary: Optional[str] = None
 
     class Config:
         from_attributes = True
 
 class JournalDetailResponse(JournalResponse):
-    """期刊详情响应（包含评论数量）"""
-    comment_count: int = 0
+    """期刊详情响应（包含完整详情数据）"""
+    page_comment_count: Optional[int] = None
+    detail_data: Optional[dict[str, Any]] = None
 
 class CommentResponse(BaseModel):
     id: int
@@ -78,6 +84,162 @@ class DataStatsResponse(BaseModel):
     journals_with_detail: int
     comments: int
 
+
+def _parse_json_value(value: Any) -> Any:
+    if value is None or isinstance(value, (dict, list)):
+        return value
+    if not isinstance(value, str):
+        return value
+
+    text = value.strip()
+    if not text:
+        return None
+    if text[0] not in "[{":
+        return value
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return value
+
+
+def _summary_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return " / ".join(f"{key}: {_summary_text(item)}" for key, item in value.items())
+    if isinstance(value, list):
+        return " / ".join(_summary_text(item) for item in value)
+    return str(value)
+
+
+def _compact_text(value: Any, limit: int = 90) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        text = _summary_text(value)
+    else:
+        text = str(value)
+    text = text.strip()
+    if not text:
+        return None
+    return text if len(text) <= limit else f"{text[:limit]}..."
+
+
+def _first_table_row(data: dict[str, Any]) -> dict[str, Any]:
+    tables = data.get("tables") or []
+    if not isinstance(tables, list):
+        return {}
+
+    for table in tables:
+        if isinstance(table, dict):
+            return table
+        if isinstance(table, list):
+            for row in table:
+                if isinstance(row, dict):
+                    return row
+    return {}
+
+
+def _join_parts(parts: list[Any], limit: int = 120) -> Optional[str]:
+    seen = []
+    for part in parts:
+        text = _compact_text(part, limit)
+        if text and text not in seen:
+            seen.append(text)
+    return _compact_text(" / ".join(seen), limit) if seen else None
+
+
+def _summarize_jcr(value: Any) -> Optional[str]:
+    data = _parse_json_value(value)
+    if isinstance(data, dict):
+        row = _first_table_row(data)
+        return _join_parts([
+            data.get("text"),
+            row.get("JIF分区"),
+            row.get("JIF排名"),
+            row.get("按JIF指标学科分区"),
+        ])
+    return _compact_text(data)
+
+
+def _summarize_citescore(value: Any) -> Optional[str]:
+    data = _parse_json_value(value)
+    if isinstance(data, dict):
+        row = _first_table_row(data)
+        ranks = row.get("CiteScore排名") if isinstance(row, dict) else None
+        first_rank = ranks[0] if isinstance(ranks, list) and ranks else {}
+        return _join_parts([
+            f"CiteScore {row.get('CiteScore')}" if row.get("CiteScore") else None,
+            first_rank.get("分区") if isinstance(first_rank, dict) else None,
+            first_rank.get("学科") if isinstance(first_rank, dict) else None,
+            first_rank.get("排名") if isinstance(first_rank, dict) else None,
+        ])
+    return _compact_text(data)
+
+
+def _summarize_generic_partition(value: Any) -> Optional[str]:
+    data = _parse_json_value(value)
+    if isinstance(data, dict):
+        row = _first_table_row(data)
+        return _join_parts([
+            data.get("text"),
+            row.get("大类学科"),
+            row.get("分区") or row.get("大类") or row.get("小类"),
+            row.get("小类学科"),
+            row.get("排名"),
+            row.get("学科"),
+        ])
+    return _compact_text(data)
+
+
+def _journal_to_response(
+    journal: Journal,
+    comment_count: int = 0,
+    include_detail: bool = False,
+) -> dict[str, Any]:
+    parsed_detail_data = _parse_json_value(journal.detail_data)
+    detail_data = parsed_detail_data if isinstance(parsed_detail_data, dict) else None
+    jcr_source = journal.jcr_partition or (detail_data or {}).get("jcr_partition") or (
+        detail_data or {}
+    ).get("WOS期刊JCR分区_（_2024-2025年最新版_）")
+    cas_source = (
+        journal.cas_partition
+        or (detail_data or {}).get("cas_partition")
+        or (detail_data or {}).get("期刊分区表_（_2025年3月升级版_）")
+        or (detail_data or {}).get("《新锐期刊分区表》_（_2026年3月发布_）")
+        or (detail_data or {}).get("期刊分区表_（_2023年12月旧的升级版_）")
+    )
+    citescore_source = journal.citescore or (detail_data or {}).get("citescore") or (
+        detail_data or {}
+    ).get("CiteScore_（_2025年最新版_）")
+    response = {
+        "id": journal.id,
+        "journal_id": journal.journal_id,
+        "name": journal.name,
+        "issn": journal.issn,
+        "eissn": journal.eissn,
+        "impact_factor": float(journal.impact_factor) if journal.impact_factor is not None else None,
+        "impact_factor_realtime": float(journal.impact_factor_realtime) if journal.impact_factor_realtime is not None else None,
+        "self_citation_rate": journal.self_citation_rate,
+        "jcr_partition": journal.jcr_partition,
+        "cas_partition": journal.cas_partition,
+        "cas_warning": journal.cas_warning,
+        "citescore": journal.citescore,
+        "review_speed": journal.review_speed,
+        "acceptance_rate": journal.acceptance_rate,
+        "detail_crawled": journal.detail_crawled,
+        "comments_crawled": journal.comments_crawled,
+        "category_id": journal.category_id,
+        "created_at": journal.created_at,
+        "comment_count": comment_count,
+        "jcr_partition_summary": _summarize_jcr(jcr_source),
+        "cas_partition_summary": _summarize_generic_partition(cas_source),
+        "citescore_summary": _summarize_citescore(citescore_source),
+    }
+    if include_detail:
+        response["detail_data"] = detail_data
+        response["page_comment_count"] = detail_data.get("comment_count") if detail_data else None
+    return response
+
 @router.get("/stats", response_model=DataStatsResponse)
 def get_data_stats(db: Session = Depends(get_db)):
     """获取数据统计"""
@@ -101,28 +263,31 @@ def list_categories(db: Session = Depends(get_db)):
 @router.get("/journals", response_model=JournalListResponse)
 def list_journals(
     category_id: Optional[int] = None,
-    search: Optional[str] = None,  # 搜索期刊名称或ISSN
+    search: Optional[str] = None,  # 搜索期刊ID、名称或ISSN
     detail_crawled: Optional[bool] = None,
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db)
 ):
-    """获取期刊列表（支持名称/ISSN模糊搜索）"""
+    """获取期刊列表（支持期刊ID/名称/ISSN搜索）"""
     query = db.query(Journal)
 
     if category_id:
         query = query.filter(Journal.category_id == category_id)
 
     if search:
-        # 支持期刊名称和ISSN的模糊搜索
-        search_pattern = f"%{search}%"
-        query = query.filter(
-            or_(
-                Journal.name.ilike(search_pattern),
-                Journal.issn.ilike(search_pattern),
-                Journal.eissn.ilike(search_pattern)
+        search_text = search.strip()
+        if search_text.isdigit():
+            query = query.filter(Journal.journal_id == int(search_text))
+        else:
+            search_pattern = f"%{search_text}%"
+            query = query.filter(
+                or_(
+                    Journal.name.ilike(search_pattern),
+                    Journal.issn.ilike(search_pattern),
+                    Journal.eissn.ilike(search_pattern),
+                )
             )
-        )
 
     if detail_crawled is not None:
         query = query.filter(Journal.detail_crawled == detail_crawled)
@@ -135,21 +300,34 @@ def list_journals(
     journals = query.order_by(
         Journal.impact_factor.desc().nullslast()
     ).offset(offset).limit(size).all()
+    journal_ids = [journal.journal_id for journal in journals]
+    comment_counts = {}
+    if journal_ids:
+        comment_counts = dict(
+            db.query(Comment.journal_id, func.count(Comment.id))
+            .filter(Comment.journal_id.in_(journal_ids))
+            .group_by(Comment.journal_id)
+            .all()
+        )
 
     return JournalListResponse(
         total=total,
         page=page,
         size=size,
-        items=journals
+        items=[
+            _journal_to_response(journal, comment_counts.get(journal.journal_id, 0))
+            for journal in journals
+        ]
     )
 
-@router.get("/journals/{journal_id}", response_model=JournalResponse)
+@router.get("/journals/{journal_id}", response_model=JournalDetailResponse)
 def get_journal(journal_id: int, db: Session = Depends(get_db)):
     """获取期刊详情"""
     journal = db.query(Journal).filter(Journal.journal_id == journal_id).first()
     if not journal:
         raise HTTPException(status_code=404, detail="期刊不存在")
-    return journal
+    comment_count = db.query(Comment).filter(Comment.journal_id == journal_id).count()
+    return _journal_to_response(journal, comment_count, include_detail=True)
 
 @router.get("/journals/{journal_id}/comments", response_model=List[CommentResponse])
 def get_journal_comments(
