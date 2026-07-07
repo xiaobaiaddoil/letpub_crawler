@@ -37,6 +37,9 @@ services:
     environment:
       DEBUG: ${DEBUG:-false}
       CONSOLE_LOG_LEVEL: ${CONSOLE_LOG_LEVEL:-INFO}
+      TZ: ${TZ:-Asia/Shanghai}
+      LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Shanghai}
+      LOG_DIR: ${APP_LOG_DIR:-/app/logs/app}
       HOST: 0.0.0.0
       PORT: 8000
       RUN_MODE: ${RUN_MODE:-master}
@@ -86,6 +89,9 @@ services:
     environment:
       DEBUG: ${DEBUG:-false}
       CONSOLE_LOG_LEVEL: ${CONSOLE_LOG_LEVEL:-INFO}
+      TZ: ${TZ:-Asia/Shanghai}
+      LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Shanghai}
+      LOG_DIR: ${WORKER_LOG_DIR:-/app/logs/worker}
       RUN_MODE: worker
       DATABASE_URL: postgresql://${POSTGRES_USER:-${DB_USER:-letpub}}:${POSTGRES_PASSWORD:-${DB_PASSWORD:-letpub_password}}@db:5432/${POSTGRES_DB:-${DB_NAME:-letpub_crawler_v2}}
       MASTER_URL: ${MASTER_URL:-http://app:8000}
