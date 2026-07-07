@@ -26,6 +26,7 @@ clean_old_logs(days=7)
 # 模板目录
 templates_dir = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(templates_dir))
+static_dir = Path(__file__).parent / "static"
 
 
 # 添加时区转换过滤器（UTC -> 本地时间，中国时区 UTC+8）
@@ -49,7 +50,7 @@ crawler_task = None
 proxy_refresh_task = None
 
 # 是否自动启动爬虫（调试时设为false）
-CRAWLER_AUTO_START = os.getenv("CRAWLER_AUTO_START", "true").lower() == "true"
+CRAWLER_AUTO_START = config.CRAWLER_AUTO_START
 
 # 运行模式
 RUN_MODE = config.RUN_MODE  # master / worker / standalone
@@ -202,6 +203,8 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan
 )
+
+app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 # 注册API路由
 app.include_router(tasks.router)

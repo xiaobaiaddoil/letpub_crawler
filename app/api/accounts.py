@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
+from dataclasses import asdict
 
 from app.database import get_db
 from app.models.account import Account
@@ -90,15 +91,24 @@ async def login_account(account_id: int, db: Session = Depends(get_db)):
             "cookie_name": cookie.name
         }
     else:
-        raise HTTPException(status_code=400, detail="登录失败")
+        raise HTTPException(status_code=400, detail=auth_service.last_error or "登录失败")
 
 
 @router.post("/refresh-all")
 async def refresh_all_cookies(db: Session = Depends(get_db)):
     """为所有活跃账号刷新Cookie"""
     auth_service = AuthService(db)
-    count = await auth_service.refresh_all_cookies()
-    return {"message": f"已刷新 {count} 个Cookie", "refreshed_count": count}
+    count, failures = await auth_service.refresh_all_cookies()
+    failed_count = len(failures)
+    message = f"已刷新 {count} 个Cookie"
+    if failed_count:
+        message += f"，{failed_count} 个账号失败"
+    return {
+        "message": message,
+        "refreshed_count": count,
+        "failed_count": failed_count,
+        "failures": [asdict(failure) for failure in failures],
+    }
 
 
 @router.post("/check-failed")

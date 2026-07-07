@@ -417,14 +417,18 @@ dependencies = [
     { name = "httpx" },
     { name = "jinja2" },
     { name = "lxml" },
-    { name = "playwright" },
     { name = "psycopg2-binary" },
     { name = "python-dotenv" },
     { name = "python-multipart" },
     { name = "pyyaml" },
     { name = "sqlalchemy" },
-    { name = "tf-playwright-stealth" },
     { name = "uvicorn" },
+]
+
+[package.optional-dependencies]
+crawler = [
+    { name = "playwright" },
+    { name = "tf-playwright-stealth" },
 ]
 
 [package.dev-dependencies]
@@ -442,15 +446,16 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "lxml", specifier = ">=6.0.2" },
-    { name = "playwright", specifier = ">=1.49.0" },
+    { name = "playwright", marker = "extra == 'crawler'", specifier = ">=1.49.0" },
     { name = "psycopg2-binary", specifier = ">=2.9.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "python-multipart", specifier = ">=0.0.12" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
-    { name = "tf-playwright-stealth", specifier = ">=1.2.0" },
+    { name = "tf-playwright-stealth", marker = "extra == 'crawler'", specifier = ">=1.2.0" },
     { name = "uvicorn", specifier = ">=0.32.0" },
 ]
+provides-extras = ["crawler"]
 
 [package.metadata.requires-dev]
 dev = [

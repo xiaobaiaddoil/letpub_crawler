@@ -69,6 +69,15 @@
             登录
           </button>
           <button
+            class="btn btn-sm btn-primary"
+            data-email="{{ account.email }}"
+            data-remark="{{ account.remark or '' }}"
+            onclick="showResetPasswordModal(this)"
+            title="重新保存该账号密码"
+          >
+            重录密码
+          </button>
+          <button
             class="btn btn-sm {% if account.is_active %}btn-warning{% else %}btn-primary{% endif %}"
             onclick="toggleAccount({{ account.id }})"
           >
@@ -319,9 +328,21 @@
   // ========== 账号管理 ==========
   function showAddAccountModal() {
     document.getElementById("account-modal-title").textContent = "添加账号";
-    document.getElementById("account-email").value = "";
+    const emailInput = document.getElementById("account-email");
+    emailInput.value = "";
+    emailInput.readOnly = false;
     document.getElementById("account-password").value = "";
     document.getElementById("account-remark").value = "";
+    document.getElementById("account-modal").style.display = "block";
+  }
+
+  function showResetPasswordModal(button) {
+    document.getElementById("account-modal-title").textContent = "重录密码";
+    const emailInput = document.getElementById("account-email");
+    emailInput.value = button.dataset.email || "";
+    emailInput.readOnly = true;
+    document.getElementById("account-password").value = "";
+    document.getElementById("account-remark").value = button.dataset.remark || "";
     document.getElementById("account-modal").style.display = "block";
   }
 
@@ -346,8 +367,9 @@
       });
 
       if (response.ok) {
+        const isPasswordReset = document.getElementById("account-email").readOnly;
         hideAccountModal();
-        alert('账号添加成功！点击"登录"按钮获取Cookie');
+        alert(isPasswordReset ? '账号密码已更新！点击"登录"按钮获取Cookie' : '账号添加成功！点击"登录"按钮获取Cookie');
         location.reload();
       } else {
         const result = await response.json();
@@ -435,7 +457,16 @@
       const result = await response.json();
 
       if (response.ok) {
-        alert(`刷新完成！成功刷新 ${result.refreshed_count} 个Cookie`);
+        let message = `刷新完成！成功刷新 ${result.refreshed_count} 个Cookie`;
+        const failures = result.failures || [];
+        if (failures.length) {
+          const failureLines = failures
+            .slice(0, 5)
+            .map((failure) => `${failure.email}: ${failure.reason}`);
+          message += `\n失败 ${failures.length} 个账号:\n${failureLines.join("\n")}`;
+          if (failures.length > 5) message += "\n...";
+        }
+        alert(message);
         location.reload();
       } else {
         alert("刷新失败: " + (result.detail || "未知错误"));

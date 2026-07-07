@@ -1,0 +1,105 @@
+name: letpub-crawler
+
+services:
+  db:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-${DB_NAME:-letpub_crawler}}
+      POSTGRES_USER: ${POSTGRES_USER:-${DB_USER:-letpub}}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-${DB_PASSWORD:-letpub_password}}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-15432}:5432"
+    volumes:
+      - ${POSTGRES_DATA_DIR:-/home/cc/database/letpub_crawler/postgres}:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-public.ecr.aws/docker/library/python:3.12-slim}
+        PLAYWRIGHT_BASE_IMAGE: ${PLAYWRIGHT_BASE_IMAGE:-mcr.microsoft.com/playwright/python:v1.57.0-noble}
+        UV_VERSION: ${UV_VERSION:-0.11.15}
+    image: ${LETPUB_WEB_IMAGE:-letpub-crawler:web}
+    command: ["web"]
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DEBUG: ${DEBUG:-false}
+      CONSOLE_LOG_LEVEL: ${CONSOLE_LOG_LEVEL:-INFO}
+      HOST: 0.0.0.0
+      PORT: 8000
+      RUN_MODE: ${RUN_MODE:-master}
+      CRAWLER_AUTO_START: ${CRAWLER_AUTO_START:-false}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-${DB_USER:-letpub}}:${POSTGRES_PASSWORD:-${DB_PASSWORD:-letpub_password}}@db:5432/${POSTGRES_DB:-${DB_NAME:-letpub_crawler}}
+      CRAWL_DELAY_MIN: ${CRAWL_DELAY_MIN:-3}
+      CRAWL_DELAY_MAX: ${CRAWL_DELAY_MAX:-8}
+      MAX_RETRY: ${MAX_RETRY:-3}
+      PARALLEL_WORKERS: ${PARALLEL_WORKERS:-3}
+      TASK_LOCK_TIMEOUT: ${TASK_LOCK_TIMEOUT:-600}
+      HEARTBEAT_INTERVAL: ${HEARTBEAT_INTERVAL:-30}
+      WORKER_TIMEOUT: ${WORKER_TIMEOUT:-120}
+      MASTER_URL: ${MASTER_URL:-}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      LETPUB_COOKIE: ${LETPUB_COOKIE:-}
+      PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: ${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      - ./logs:/app/logs
+      - ./config:/app/config:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/crawler/status', timeout=3).read()\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-public.ecr.aws/docker/library/python:3.12-slim}
+        PLAYWRIGHT_BASE_IMAGE: ${PLAYWRIGHT_BASE_IMAGE:-mcr.microsoft.com/playwright/python:v1.57.0-noble}
+        UV_VERSION: ${UV_VERSION:-0.11.15}
+    image: ${LETPUB_WORKER_IMAGE:-letpub-crawler:worker}
+    command: ["worker"]
+    profiles: ["worker"]
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+    environment:
+      DEBUG: ${DEBUG:-false}
+      CONSOLE_LOG_LEVEL: ${CONSOLE_LOG_LEVEL:-INFO}
+      RUN_MODE: worker
+      DATABASE_URL: postgresql://${POSTGRES_USER:-${DB_USER:-letpub}}:${POSTGRES_PASSWORD:-${DB_PASSWORD:-letpub_password}}@db:5432/${POSTGRES_DB:-${DB_NAME:-letpub_crawler}}
+      MASTER_URL: ${MASTER_URL:-http://app:8000}
+      WORKER_ID: ${LOCAL_WORKER_ID:-${CRAWLER_WORKER_ID:-}}
+      CRAWL_DELAY_MIN: ${CRAWL_DELAY_MIN:-3}
+      CRAWL_DELAY_MAX: ${CRAWL_DELAY_MAX:-8}
+      MAX_RETRY: ${MAX_RETRY:-3}
+      PARALLEL_WORKERS: ${LOCAL_WORKER_CONCURRENCY:-${PARALLEL_WORKERS:-2}}
+      TASK_LOCK_TIMEOUT: ${TASK_LOCK_TIMEOUT:-600}
+      HEARTBEAT_INTERVAL: ${HEARTBEAT_INTERVAL:-30}
+      WORKER_TIMEOUT: ${WORKER_TIMEOUT:-120}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      LETPUB_COOKIE: ${LETPUB_COOKIE:-}
+      PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: ${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}
+    volumes:
+      - ./logs:/app/logs
+      - ./config:/app/config:ro

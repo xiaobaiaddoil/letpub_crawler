@@ -30,6 +30,7 @@ env/
 # IDE
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 
@@ -51,6 +52,13 @@ logs/
 # Database
 *.db
 *.sqlite3
+
+# Backups and deployment artifacts
+backups/
+*.dump
+*.tar
+*.tar.gz
+*.sha256
 
 # Playwright
 playwright-report/

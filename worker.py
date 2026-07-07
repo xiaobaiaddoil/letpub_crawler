@@ -33,6 +33,15 @@ from app.models.worker import Worker, WorkerStatus
 from app.models.task import CrawlTask, TaskType, TaskStatus
 from app.services.task_manager import TaskManager, generate_worker_id
 from app.services.problem_service import ProblemService
+from app.crawler.category_crawler import CategoryCrawler
+from app.crawler.list_crawler import ListCrawler
+from app.crawler.detail_crawler import DetailCrawler
+
+_CRAWLER_CLASS = {
+    TaskType.CATEGORY.value: CategoryCrawler,
+    TaskType.LIST.value: ListCrawler,
+    TaskType.DETAIL.value: DetailCrawler,
+}
 
 # 初始化日志
 setup_app_logging(debug=config.DEBUG, console_level=config.CONSOLE_LOG_LEVEL)
@@ -260,21 +269,38 @@ class DistributedWorker:
         except Exception as e:
             logger.warning(f"重置失败任务出错: {e}")
 
+    async def _fail_acquired_task(self, task, coroutine_id: int, error: Exception):
+        """Mark an already-acquired task as failed when setup fails before task execution."""
+        db = SessionLocal()
+        try:
+            error_msg = str(error) or type(error).__name__
+            TaskManager(db, self.worker_id).fail_task(task, error_msg)
+            await self.increment_stats(failed=1)
+            logger.error(
+                f"[消费者-{coroutine_id}] 任务准备失败 task={task.id}",
+                exc_info=(type(error), error, error.__traceback__),
+            )
+        except Exception as fail_error:
+            db.rollback()
+            logger.error(f"[消费者-{coroutine_id}] 标记任务失败也失败 task={task.id}: {fail_error}")
+        finally:
+            db.close()
+
     # ------------------------------------------------------------------ #
     # 任务执行                                                              #
     # ------------------------------------------------------------------ #
 
-    async def _execute_task(self, task, task_type: str, coroutine_id: int):
+    async def _execute_task(self, task, task_type: str, coroutine_id: int, crawler) -> bool:
         if task_type == TaskType.CATEGORY.value:
-            await self._execute_category_task(task, coroutine_id)
+            return await self._execute_category_task(task, coroutine_id, crawler)
         elif task_type == TaskType.LIST.value:
-            await self._execute_list_task(task, coroutine_id)
+            return await self._execute_list_task(task, coroutine_id, crawler)
         elif task_type == TaskType.DETAIL.value:
-            await self._execute_detail_task(task, coroutine_id)
+            return await self._execute_detail_task(task, coroutine_id, crawler)
+        return False
 
-    async def _execute_category_task(self, task, coroutine_id: int):
+    async def _execute_category_task(self, task, coroutine_id: int, crawler):
         import math
-        from app.crawler.category_crawler import CategoryCrawler
         from app.models.category import Category
 
         JOURNALS_PER_PAGE = 10
@@ -282,11 +308,8 @@ class DistributedWorker:
         logger.info(f"{tag} 开始 task={task.id}")
 
         db = SessionLocal()
-        crawler = None
         try:
             tm = TaskManager(db, self.worker_id)
-            crawler = CategoryCrawler()
-            await crawler.init_browser()
             tm.renew_task_lock(task)
 
             categories = await crawler.crawl()
@@ -329,6 +352,7 @@ class DistributedWorker:
             await crawler.report_cookie_result(success=True)
             await crawler.report_proxy_result(success=True)
             await self.increment_stats(completed=1)
+            return True
 
         except Exception as e:
             db.rollback()
@@ -336,18 +360,15 @@ class DistributedWorker:
             logger.exception(f"{tag} 失败 task={task.id}")
             await self._save_failed_html(crawler, "category", error_msg)
             TaskManager(db, self.worker_id).fail_task(task, error_msg)
-            if crawler:
-                await crawler.report_cookie_result(success=False)
-                await crawler.report_proxy_result(success=False)
+            await crawler.report_cookie_result(success=False)
+            await crawler.report_proxy_result(success=False)
             await self.increment_stats(failed=1)
             await self._handle_request_failure(crawler)
+            return False
         finally:
-            if crawler:
-                await crawler.close()
             db.close()
 
-    async def _execute_list_task(self, task, coroutine_id: int):
-        from app.crawler.list_crawler import ListCrawler
+    async def _execute_list_task(self, task, coroutine_id: int, crawler):
         from app.models.category import Category
         from app.models.journal import Journal
 
@@ -358,11 +379,8 @@ class DistributedWorker:
         logger.info(f"{tag} 开始 task={task.id} field={field_tag} page={page}")
 
         db = SessionLocal()
-        crawler = None
         try:
             tm = TaskManager(db, self.worker_id)
-            crawler = ListCrawler()
-            await crawler.init_browser()
             tm.renew_task_lock(task)
 
             category = db.query(Category).filter(Category.field_tag == field_tag).first()
@@ -386,6 +404,7 @@ class DistributedWorker:
             await crawler.report_proxy_result(success=True)
             await self.increment_stats(completed=1)
             logger.info(f"{tag} 完成 task={task.id} field={field_tag} page={page} 期刊数={len(journals)}")
+            return True
 
         except Exception as e:
             db.rollback()
@@ -393,18 +412,15 @@ class DistributedWorker:
             logger.exception(f"{tag} 失败 task={task.id}")
             await self._save_failed_html(crawler, task.target_id, error_msg)
             TaskManager(db, self.worker_id).fail_task(task, error_msg)
-            if crawler:
-                await crawler.report_cookie_result(success=False)
-                await crawler.report_proxy_result(success=False)
+            await crawler.report_cookie_result(success=False)
+            await crawler.report_proxy_result(success=False)
             await self.increment_stats(failed=1)
             await self._handle_request_failure(crawler)
+            return False
         finally:
-            if crawler:
-                await crawler.close()
             db.close()
 
-    async def _execute_detail_task(self, task, coroutine_id: int):
-        from app.crawler.detail_crawler import DetailCrawler
+    async def _execute_detail_task(self, task, coroutine_id: int, crawler):
         from app.models.journal import Journal
         from app.models.comment import Comment
 
@@ -413,11 +429,8 @@ class DistributedWorker:
         logger.info(f"{tag} 开始 task={task.id} journal_id={journal_id}")
 
         db = SessionLocal()
-        crawler = None
         try:
             tm = TaskManager(db, self.worker_id)
-            crawler = DetailCrawler()
-            await crawler.init_browser()
             tm.renew_task_lock(task)
 
             detail = await crawler.crawl(journal_id)
@@ -472,6 +485,7 @@ class DistributedWorker:
             await crawler.report_proxy_result(success=True)
             await self.increment_stats(completed=1)
             logger.info(f"{tag} 完成 task={task.id} journal_id={journal_id}")
+            return True
 
         except Exception as e:
             db.rollback()
@@ -479,14 +493,12 @@ class DistributedWorker:
             logger.exception(f"{tag} 失败 task={task.id} journal_id={journal_id}")
             await self._save_failed_html(crawler, task.target_id, error_msg)
             TaskManager(db, self.worker_id).fail_task(task, error_msg)
-            if crawler:
-                await crawler.report_cookie_result(success=False)
-                await crawler.report_proxy_result(success=False)
+            await crawler.report_cookie_result(success=False)
+            await crawler.report_proxy_result(success=False)
             await self.increment_stats(failed=1)
             await self._handle_request_failure(crawler)
+            return False
         finally:
-            if crawler:
-                await crawler.close()
             db.close()
 
     # ------------------------------------------------------------------ #
@@ -494,8 +506,11 @@ class DistributedWorker:
     # ------------------------------------------------------------------ #
 
     async def _consumer_loop(self, coroutine_id: int):
-        """持久消费者协程：独立拉取任务，完成即拉下一个。"""
+        """持久消费者协程：独立拉取任务，完成即拉下一个。Browser 跨任务复用，只换 context。"""
         logger.info(f"[消费者-{coroutine_id}] 启动")
+        crawler = None
+        current_crawler_type = None
+
         while self._running:
             if self._paused:
                 await asyncio.sleep(1)
@@ -508,8 +523,45 @@ class DistributedWorker:
                 await asyncio.sleep(self.NO_TASK_SLEEP_SECONDS)
                 continue
 
-            await self._execute_task(task, task_type, coroutine_id)
+            use_cookie = (task_type == TaskType.DETAIL.value)
 
+            try:
+                CrawlerClass = _CRAWLER_CLASS[task_type]
+                if crawler is not None and current_crawler_type != task_type:
+                    await crawler.close()
+                    crawler = None
+
+                if crawler is None:
+                    crawler = CrawlerClass()
+                    await crawler.init_browser(use_proxy=True, use_cookie=use_cookie)
+                    current_crawler_type = task_type
+                    logger.info(f"[消费者-{coroutine_id}] 新建 browser type={task_type}")
+                else:
+                    try:
+                        await crawler.reset_context(use_cookie=use_cookie)
+                        logger.debug(f"[消费者-{coroutine_id}] 复用 browser，重置 context")
+                    except Exception as e:
+                        logger.warning(f"[消费者-{coroutine_id}] reset_context 失败({e})，重建 browser")
+                        await crawler.close()
+                        crawler = CrawlerClass()
+                        await crawler.init_browser(use_proxy=True, use_cookie=use_cookie)
+                        current_crawler_type = task_type
+            except Exception as e:
+                await self._fail_acquired_task(task, coroutine_id, e)
+                if crawler:
+                    await crawler.close()
+                    crawler = None
+                current_crawler_type = None
+                continue
+
+            task_success = await self._execute_task(task, task_type, coroutine_id, crawler)
+            if not task_success or crawler.is_using_direct():
+                await crawler.close()
+                crawler = None
+                current_crawler_type = None
+
+        if crawler:
+            await crawler.close()
         logger.info(f"[消费者-{coroutine_id}] 退出")
 
     # ------------------------------------------------------------------ #

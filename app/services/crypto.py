@@ -1,13 +1,12 @@
 """加密服务 - 用于账号密码的加密存储"""
-import os
 import base64
 import hashlib
 from cryptography.fernet import Fernet
 from app.config import config
 
-# 从环境变量获取加密密钥，如果没有则生成一个
+# 从配置获取加密密钥，如果没有则使用 DATABASE_URL 派生一个
 # 生产环境必须设置 ENCRYPTION_KEY 环境变量
-_ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
+_ENCRYPTION_KEY = config.ENCRYPTION_KEY
 
 if not _ENCRYPTION_KEY:
     # 使用 DATABASE_URL 的哈希作为默认密钥（不推荐生产使用）

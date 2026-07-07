@@ -83,13 +83,20 @@
       </tr>
     </thead>
     <tbody>
-      {% for cat in categories %}
+      {% for cat in categories[:200] %}
       <tr>
         <td>{{ cat.name }}</td>
         <td>{{ cat.field_tag }}</td>
         <td>{{ cat.total_count }}</td>
       </tr>
       {% endfor %}
+      {% if categories|length > 200 %}
+      <tr>
+        <td colspan="3" class="text-muted">
+          仅显示前 200 个分类，完整分类可使用上方筛选框检索。
+        </td>
+      </tr>
+      {% endif %}
     </tbody>
   </table>
 </div>

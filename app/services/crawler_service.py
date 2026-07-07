@@ -8,9 +8,6 @@ from app.models.task import TaskType, TaskStatus, CrawlTask
 from app.models.category import Category
 from app.models.journal import Journal
 from app.models.comment import Comment
-from app.crawler.category_crawler import CategoryCrawler
-from app.crawler.list_crawler import ListCrawler
-from app.crawler.detail_crawler import DetailCrawler, DataValidationError
 from app.database import SessionLocal
 from app.config import config
 
@@ -139,6 +136,8 @@ class CrawlerService:
             await self._execute_detail_task(task, coroutine_id)
 
     async def _execute_category_task(self, task, coroutine_id: int):
+        from app.crawler.category_crawler import CategoryCrawler
+
         tag = f"[消费者-{coroutine_id}][分类]"
         logger.info(f"{tag} 开始 task={task.id}")
 
@@ -193,6 +192,8 @@ class CrawlerService:
             db.close()
 
     async def _execute_list_task(self, task, coroutine_id: int):
+        from app.crawler.list_crawler import ListCrawler
+
         extra = json.loads(task.extra_data) if task.extra_data else {}
         field_tag = extra.get("field_tag")
         page = extra.get("page", 1)
@@ -232,6 +233,8 @@ class CrawlerService:
             db.close()
 
     async def _execute_detail_task(self, task, coroutine_id: int):
+        from app.crawler.detail_crawler import DetailCrawler, DataValidationError
+
         journal_id = int(task.target_id)
         tag = f"[消费者-{coroutine_id}][详情]"
         logger.info(f"{tag} 开始 task={task.id} journal_id={journal_id}")

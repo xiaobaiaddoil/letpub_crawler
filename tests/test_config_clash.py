@@ -41,3 +41,33 @@ def test_clash_reads_section(tmp_path, monkeypatch):
     assert cfg.CLASH_SECRET == "abc"
     assert cfg.CLASH_LISTENER_PORT == 31000
     assert cfg.CLASH_GROUP_NAME == "g"
+
+
+def test_env_overrides_yaml(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.config.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("RUN_MODE", "master")
+    monkeypatch.setenv("CRAWLER_AUTO_START", "false")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://env_user:env_pass@db:5432/env_db")
+    monkeypatch.setenv("PARALLEL_WORKERS", "7")
+    monkeypatch.setenv("LETPUB_COOKIE", "a=b")
+    write_yaml(tmp_path / "app.yaml", {
+        "run_mode": "standalone",
+        "crawler_auto_start": True,
+        "database": {
+            "host": "localhost",
+            "port": 5432,
+            "name": "yaml_db",
+            "user": "yaml_user",
+            "password": "yaml_pass",
+        },
+        "crawler": {"parallel_workers": 3},
+    })
+    write_yaml(tmp_path / "proxy.yaml", {})
+
+    cfg = Config()
+
+    assert cfg.RUN_MODE == "master"
+    assert cfg.CRAWLER_AUTO_START is False
+    assert cfg.DATABASE_URL == "postgresql://env_user:env_pass@db:5432/env_db"
+    assert cfg.PARALLEL_WORKERS == 7
+    assert cfg.LETPUB_COOKIE == "a=b"

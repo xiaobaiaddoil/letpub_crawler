@@ -2,10 +2,12 @@ import asyncio
 import random
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional, Dict
+from typing import Optional, Dict, TYPE_CHECKING
 import httpx
-from playwright.async_api import async_playwright, Browser, Page, BrowserContext
 from app.config import config
+
+if TYPE_CHECKING:
+    from playwright.async_api import Browser, Page, BrowserContext
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +59,9 @@ class BaseCrawler(ABC):
     """爬虫基类"""
 
     def __init__(self):
-        self.browser: Optional[Browser] = None
-        self.context: Optional[BrowserContext] = None
-        self.page: Optional[Page] = None
+        self.browser: Optional["Browser"] = None
+        self.context: Optional["BrowserContext"] = None
+        self.page: Optional["Page"] = None
         self._playwright = None
         # Cookie 池相关
         self._current_cookie_info: Optional[Dict] = None  # 当前使用的 Cookie 信息
@@ -123,6 +125,13 @@ class BaseCrawler(ABC):
             use_proxy: 是否使用代理，默认为 True
             use_cookie: 是否注入 Cookie，默认为 True。基本信息爬取传 False。
         """
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError as exc:
+            raise RuntimeError(
+                "当前环境未安装 Playwright 依赖。请使用 worker 镜像，或安装 crawler 额外依赖：uv sync --extra crawler。"
+            ) from exc
+
         self._playwright = await async_playwright().start()
 
         # 浏览器启动参数（消除 Playwright/Chromium 自动化特征）
@@ -165,11 +174,15 @@ class BaseCrawler(ABC):
             self._using_direct = True
             logger.info("[代理] 已禁用代理，使用直连")
 
-        self.browser = await self._playwright.chromium.launch(
-            headless=True,
-            args=launch_args,
-            proxy=proxy_config
-        )
+        launch_options = {
+            "headless": True,
+            "args": launch_args,
+            "proxy": proxy_config,
+        }
+        if config.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:
+            launch_options["executable_path"] = config.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+
+        self.browser = await self._playwright.chromium.launch(**launch_options)
         await self._create_context(use_cookie=use_cookie)
 
     async def _get_cookie_from_pool(self) -> Optional[str]:
@@ -285,6 +298,18 @@ class BaseCrawler(ABC):
     def is_using_direct(self) -> bool:
         """是否使用直连（无代理）"""
         return self._using_direct
+
+    async def reset_context(self, use_cookie: bool = True):
+        """複用 browser，只重建 context + page（換 cookie/UA）。"""
+        if self.context:
+            try:
+                await self.context.close()
+            except Exception:
+                pass
+            self.context = None
+            self.page = None
+        self._current_cookie_info = None
+        await self._create_context(use_cookie=use_cookie)
 
     async def random_delay(self):
         """随机延迟"""

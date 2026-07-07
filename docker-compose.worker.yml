@@ -1,0 +1,27 @@
+name: letpub-crawler-worker
+
+services:
+  worker:
+    image: ${LETPUB_WORKER_IMAGE:-letpub-crawler:worker}
+    command: ["worker"]
+    restart: unless-stopped
+    environment:
+      DEBUG: ${DEBUG:-false}
+      CONSOLE_LOG_LEVEL: ${CONSOLE_LOG_LEVEL:-INFO}
+      RUN_MODE: worker
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL to the master PostgreSQL URL}
+      MASTER_URL: ${MASTER_URL:?set MASTER_URL to the master Web/API URL}
+      WORKER_ID: ${CRAWLER_WORKER_ID:-}
+      CRAWL_DELAY_MIN: ${CRAWL_DELAY_MIN:-3}
+      CRAWL_DELAY_MAX: ${CRAWL_DELAY_MAX:-8}
+      MAX_RETRY: ${MAX_RETRY:-3}
+      PARALLEL_WORKERS: ${PARALLEL_WORKERS:-3}
+      TASK_LOCK_TIMEOUT: ${TASK_LOCK_TIMEOUT:-600}
+      HEARTBEAT_INTERVAL: ${HEARTBEAT_INTERVAL:-30}
+      WORKER_TIMEOUT: ${WORKER_TIMEOUT:-120}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      LETPUB_COOKIE: ${LETPUB_COOKIE:-}
+      PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: ${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}
+    volumes:
+      - ./logs:/app/logs
+      - ./config:/app/config:ro
