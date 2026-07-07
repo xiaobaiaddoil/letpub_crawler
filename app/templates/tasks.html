@@ -44,7 +44,12 @@
 <div class="card">
     <div class="flex-between">
         <h2>增量更新检测</h2>
-        <button class="btn btn-primary btn-sm" onclick="checkIncrementalUpdates()">检测更新</button>
+        <div class="flex">
+            <button class="btn btn-primary btn-sm" onclick="createIndexCheckTask()">检查新增期刊</button>
+            <button class="btn btn-warning btn-sm" onclick="createIndexScanTasks()">创建新增扫描任务</button>
+            <button class="btn btn-danger btn-sm" onclick="createFullDetailRefreshTasks()">全量详情更新</button>
+            <button class="btn btn-sm" onclick="checkIncrementalUpdates()">检测详情更新</button>
+        </div>
     </div>
     <div id="incremental-result" style="display: none;">
         <div class="flex" style="gap: 20px; margin-top: 15px;">
@@ -300,6 +305,36 @@
             ).join('');
         } else {
             document.getElementById('outdated-list').innerHTML = '<div class="text-muted">无</div>';
+        }
+    }
+
+    async function createIndexCheckTask() {
+        const result = await apiCall('/api/tasks/index-check');
+        if (result) {
+            alert(result.message);
+            loadStats();
+        }
+    }
+
+    async function createIndexScanTasks() {
+        if (!confirm('确定要根据最近检测结果创建新增期刊扫描任务吗？')) return;
+        const result = await apiCall('/api/tasks/index-scan');
+        if (result) {
+            alert(result.message);
+            loadStats();
+        }
+    }
+
+    async function createFullDetailRefreshTasks() {
+        if (!confirm('确定要为所有已知期刊创建详情更新任务吗？这会重新抓取详情并记录指标变化。')) return;
+        const result = await apiCall('/api/tasks/full-detail-refresh', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({})
+        });
+        if (result) {
+            alert(result.message);
+            loadStats();
         }
     }
 

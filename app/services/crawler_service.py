@@ -1,7 +1,6 @@
 import json
 import asyncio
 import logging
-import math
 from sqlalchemy.orm import Session
 from app.services.task_manager import TaskManager, generate_worker_id
 from app.models.task import TaskType, TaskStatus, CrawlTask
@@ -10,10 +9,11 @@ from app.models.journal import Journal
 from app.models.comment import Comment
 from app.database import SessionLocal
 from app.config import config
+from app.services.index_service import IndexService
+from app.services.metric_service import MetricService
 
 logger = logging.getLogger(__name__)
 
-JOURNALS_PER_PAGE = 10
 NO_TASK_SLEEP_SECONDS = 5
 
 
@@ -144,6 +144,7 @@ class CrawlerService:
         db = SessionLocal()
         try:
             tm = TaskManager(db, self.worker_id)
+            index_service = IndexService(db)
             async with CategoryCrawler() as crawler:
                 tm.renew_task_lock(task)
                 categories = await crawler.crawl()
@@ -154,7 +155,6 @@ class CrawlerService:
                 for cat_data in categories:
                     field_tag = cat_data["field_tag"]
                     new_total = cat_data.get("total_count", 0)
-                    total_pages = math.ceil(new_total / JOURNALS_PER_PAGE) if new_total > 0 else 0
                     category = db.query(Category).filter(Category.field_tag == field_tag).first()
 
                     if not category:
@@ -166,10 +166,6 @@ class CrawlerService:
                         db.add(category)
                         db.commit()
                         new_count += 1
-                        if new_total > 0:
-                            list_tasks = tm.create_list_tasks(field_tag, total_pages)
-                            scheduled_list_tasks += len(list_tasks)
-                            logger.info(f"{tag} 新分类 {cat_data['name']}: {new_total} 期刊, {total_pages} 页")
 
                     else:
                         old_total = category.total_count or 0
@@ -180,22 +176,15 @@ class CrawlerService:
                             db.commit()
                             updated_count += 1
 
-                        if total_pages > 0:
-                            list_tasks = tm.create_list_tasks(
-                                field_tag,
-                                total_pages,
-                                refresh_completed=True,
-                            )
-                            scheduled_list_tasks += len(list_tasks)
-                            if category_changed:
-                                logger.info(
-                                    f"{tag} 分类更新 {cat_data['name']}: {old_total}->{new_total} 期刊, "
-                                    f"已安排 {len(list_tasks)} 个列表页增量扫描"
-                                )
-                            else:
-                                logger.debug(
-                                    f"{tag} 分类 {cat_data['name']} 数量未变，已安排 {len(list_tasks)} 个列表页增量扫描"
-                                )
+                    state = index_service.update_category_state(category, new_total)
+                    if state.status in ("changed", "missing_index"):
+                        list_tasks = tm.create_list_tasks(field_tag, state.total_pages, refresh_completed=True)
+                        scheduled_list_tasks += len(list_tasks)
+                        logger.info(
+                            f"{tag} 分类 {cat_data['name']} 索引状态={state.status} "
+                            f"远端={state.remote_total_count} 本地索引={state.local_index_count} "
+                            f"已安排 {len(list_tasks)} 个列表页扫描"
+                        )
 
                 logger.info(
                     f"{tag} 完成 task={task.id} 新增分类={new_count} 更新分类={updated_count} "
@@ -230,6 +219,10 @@ class CrawlerService:
                 new_count = 0
                 updated_count = 0
                 detail_task_count = 0
+                new_index_count = 0
+
+                if category:
+                    new_index_count = IndexService(db).record_list_page(category, page, journals)
 
                 for j_data in journals:
                     journal = db.query(Journal).filter(Journal.journal_id == j_data["journal_id"]).first()
@@ -265,7 +258,7 @@ class CrawlerService:
             tm.complete_task(task)
             logger.info(
                 f"{tag} 完成 task={task.id} field={field_tag} page={page} 期刊数={len(journals)} "
-                f"新增={new_count} 更新={updated_count} 详情任务={detail_task_count}"
+                f"新增={new_count} 更新={updated_count} 新索引={new_index_count} 详情任务={detail_task_count}"
             )
 
         except Exception as e:
@@ -331,6 +324,7 @@ class CrawlerService:
                         db.execute(stmt)
 
                     journal.comments_crawled = True
+                    MetricService(db).record_snapshot(journal, basic_info, task_id=task.id)
                     db.commit()
 
             tm.complete_task(task)

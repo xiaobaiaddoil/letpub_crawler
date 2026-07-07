@@ -218,18 +218,15 @@ app.include_router(problems.router)
 # 爬虫控制API
 @app.post("/api/crawler/start")
 async def start_crawler():
-    """启动完整爬取（创建任务，由Worker执行）"""
+    """启动/恢复已有任务消费，不创建新的爬取任务."""
     global crawler_task
-
-    # 创建爬取任务（无论什么模式都可以创建任务）
-    await crawler_service.start_full_crawl()
 
     # 主服务器模式下不启动本地爬虫
     if RUN_MODE == "master":
         return {
-            "message": "已创建爬取任务，等待Worker执行",
+            "message": "已通知Worker处理现有任务，请确保Worker节点在线",
             "mode": "master",
-            "status": "pending"
+            "status": "waiting_workers"
         }
 
     # 单机模式下启动本地爬虫
@@ -237,7 +234,8 @@ async def start_crawler():
         crawler_task = asyncio.create_task(crawler_service.run())
         logger.info("爬虫服务已启动")
 
-    return {"message": "已创建爬取任务", "mode": RUN_MODE, "status": "running"}
+    crawler_service.resume()
+    return {"message": "已启动任务消费", "mode": RUN_MODE, "status": "running"}
 
 
 @app.post("/api/crawler/pause")

@@ -8,6 +8,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 from app.models.task import CrawlTask, TaskType, TaskStatus
 from app.models.journal import Journal
+from app.models.journal_index import CategoryIndexState
 from app.config import config
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,10 @@ class TaskManager:
         self.db.refresh(task)
         logger.info(f"创建分类任务: {task.id}")
         return task
+
+    def create_index_check_task(self) -> CrawlTask:
+        """创建新增期刊索引检测任务."""
+        return self.create_category_task()
 
     def create_list_tasks(
         self,
@@ -198,6 +203,35 @@ class TaskManager:
         self.db.commit()
         self.db.refresh(task)
         return task
+
+    def create_index_scan_tasks(self, statuses: tuple[str, ...] = ("changed", "missing_index")) -> int:
+        """为索引检测发现差异的分类创建列表扫描任务."""
+        states = self.db.query(CategoryIndexState).filter(
+            CategoryIndexState.status.in_(statuses),
+            CategoryIndexState.total_pages > 0,
+        ).all()
+
+        created = 0
+        for state in states:
+            created += len(self.create_list_tasks(
+                state.field_tag,
+                state.total_pages,
+                refresh_completed=True,
+            ))
+        return created
+
+    def create_full_detail_refresh_tasks(self, limit: int | None = None) -> int:
+        """为所有已知期刊创建详情刷新任务，用于全量指标更新."""
+        query = self.db.query(Journal).order_by(Journal.updated_at.asc().nullsfirst())
+        if limit:
+            query = query.limit(limit)
+
+        created = 0
+        for journal in query.all():
+            task = self.reset_or_create_detail_task(journal.journal_id, journal.category_id)
+            if task.status != TaskStatus.RUNNING.value:
+                created += 1
+        return created
 
     def get_pending_tasks(self, task_type: str = None, limit: int = 10) -> List[CrawlTask]:
         """获取待处理任务（旧方法，保留兼容性）"""

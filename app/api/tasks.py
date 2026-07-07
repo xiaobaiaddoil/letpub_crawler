@@ -34,6 +34,10 @@ class TaskStatsResponse(BaseModel):
     by_type: dict
     total: int
 
+
+class FullRefreshRequest(BaseModel):
+    limit: Optional[int] = None
+
 @router.get("/", response_model=List[TaskResponse])
 def list_tasks(
     status: Optional[str] = None,
@@ -124,6 +128,31 @@ def reset_all_detail_tasks(db: Session = Depends(get_db)):
     task_manager = TaskManager(db)
     count = task_manager.reset_all_detail_tasks()
     return {"message": f"已重置 {count} 个详情任务"}
+
+
+@router.post("/index-check")
+def create_index_check_task(db: Session = Depends(get_db)):
+    """创建新增期刊索引检测任务."""
+    task = TaskManager(db).create_index_check_task()
+    return {"message": "已创建新增期刊检测任务", "task_id": task.id}
+
+
+@router.post("/index-scan")
+def create_index_scan_tasks(db: Session = Depends(get_db)):
+    """根据最近一次索引检测结果创建列表扫描任务."""
+    count = TaskManager(db).create_index_scan_tasks()
+    return {"message": f"已创建/刷新 {count} 个列表扫描任务", "created_count": count}
+
+
+@router.post("/full-detail-refresh")
+def create_full_detail_refresh_tasks(
+    request: FullRefreshRequest | None = None,
+    db: Session = Depends(get_db),
+):
+    """创建全量详情刷新任务，用于记录指标变化."""
+    limit = request.limit if request else None
+    count = TaskManager(db).create_full_detail_refresh_tasks(limit=limit)
+    return {"message": f"已创建/刷新 {count} 个详情更新任务", "created_count": count}
 
 @router.post("/{task_id}/re-crawl")
 def re_crawl_task(task_id: int, db: Session = Depends(get_db)):
