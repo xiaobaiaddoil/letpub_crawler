@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(tree:*)",
-      "Bash(uv sync:*)",
-      "Bash(uv run *)"
-    ]
-  }
-}
