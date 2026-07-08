@@ -11,7 +11,7 @@ from pathlib import Path
 
 from app.config import config
 from app.database import init_db, get_db, SessionLocal
-from app.api import tasks, data, workers, cookies, accounts, proxies, problems
+from app.api import tasks, data, workers, cookies, accounts, proxies, problems, journals
 from app.services.crawler_service import crawler_service
 from app.services.task_manager import TaskManager
 from app.services.worker_status import is_worker_online, to_db_naive
@@ -195,7 +195,10 @@ app = FastAPI(
     title="LetPub期刊爬虫系统",
     description="分布式爬取LetPub网站的期刊数据",
     version="2.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
@@ -208,6 +211,7 @@ app.include_router(cookies.router)
 app.include_router(accounts.router)
 app.include_router(proxies.router)
 app.include_router(problems.router)
+app.include_router(journals.router)
 
 # 爬虫控制API
 @app.post("/api/crawler/start")
@@ -352,6 +356,14 @@ async def journals_page(request: Request, db: Session = Depends(get_db)):
         "request": request,
         "categories": categories,
         "journals": journals
+    })
+
+
+@app.get("/api-docs", response_class=HTMLResponse)
+async def api_docs_page(request: Request):
+    """期刊查询调试页面"""
+    return templates.TemplateResponse("api_docs.html", {
+        "request": request
     })
 
 

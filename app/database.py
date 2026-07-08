@@ -1,7 +1,9 @@
 from sqlalchemy import create_engine
+from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker, declarative_base
 from app.config import config
 import json
+import logging
 
 # 配置 PostgreSQL JSONB 支持
 from psycopg2.extensions import register_adapter, AsIs
@@ -11,6 +13,8 @@ def adapt_dict(d):
     return AsIs(f"'{json.dumps(d, ensure_ascii=False)}'::jsonb")
 
 register_adapter(dict, adapt_dict)
+
+logger = logging.getLogger(__name__)
 
 engine = create_engine(
     config.DATABASE_URL,
@@ -35,4 +39,10 @@ def get_db():
 def init_db():
     """初始化数据库表"""
     from app import models  # noqa: F401
+    if engine.dialect.name == "postgresql":
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+        except Exception as exc:
+            logger.warning("pg_trgm 扩展初始化失败，拼写容错查询将退回普通模糊查询: %s", exc)
     Base.metadata.create_all(bind=engine)
