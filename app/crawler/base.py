@@ -5,6 +5,13 @@ from abc import ABC, abstractmethod
 from typing import Optional, Dict, TYPE_CHECKING
 import httpx
 from app.config import config
+from app.services.proxy_runtime import (
+    httpx_proxy_url,
+    is_loopback_proxy_host,
+    playwright_proxy_server,
+    proxy_display,
+    runtime_proxy_host,
+)
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, Page, BrowserContext
@@ -95,6 +102,28 @@ class BaseCrawler(ABC):
 
         return None
 
+    async def _probe_proxy(self, proxy_info: Dict) -> bool:
+        """Check local/clash proxy reachability before giving it to browser."""
+        host = proxy_info.get("ip")
+        source = proxy_info.get("source")
+        if source != "clash" and not is_loopback_proxy_host(host):
+            return True
+
+        runtime_host = runtime_proxy_host(host)
+        port = int(proxy_info.get("port") or 0)
+        display = proxy_display(proxy_info)
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(runtime_host, port),
+                timeout=2,
+            )
+            writer.close()
+            await writer.wait_closed()
+            return True
+        except Exception as exc:
+            logger.warning(f"[代理] {display} 不可连接，跳过代理改用直连: {exc}")
+            return False
+
     async def report_proxy_result(self, success: bool):
         """向 Master 服务器报告代理使用结果"""
         if not config.MASTER_URL or not self._current_proxy_info:
@@ -154,18 +183,23 @@ class BaseCrawler(ABC):
 
         if use_proxy:
             proxy_info = await self._get_proxy_from_pool()
+            if proxy_info and not await self._probe_proxy(proxy_info):
+                self._current_proxy_info = None
+                proxy_info = None
+
             if proxy_info:
-                server = f"{proxy_info.get('protocol', 'http')}://{proxy_info['ip']}:{proxy_info['port']}"
+                server = playwright_proxy_server(proxy_info)
                 proxy_config = {"server": server}
+                display = proxy_display(proxy_info)
 
                 # 如果有用户名密码，添加认证
                 if proxy_info.get("username") and proxy_info.get("password"):
                     proxy_config["username"] = proxy_info["username"]
                     proxy_config["password"] = proxy_info["password"]
-                    logger.info(f"[代理] 使用代理(密码认证): {proxy_info['ip']}:{proxy_info['port']}")
+                    logger.info(f"[代理] 使用代理(密码认证): {display}")
                 else:
                     # 白名单模式
-                    logger.info(f"[代理] 使用代理(白名单): {proxy_info['ip']}:{proxy_info['port']}")
+                    logger.info(f"[代理] 使用代理(白名单): {display}")
             else:
                 # 无可用代理，使用直连
                 self._using_direct = True
@@ -292,8 +326,12 @@ class BaseCrawler(ABC):
     def get_proxy_display(self) -> str:
         """获取代理显示字符串（用于日志）"""
         if self._current_proxy_info:
-            return f"{self._current_proxy_info.get('ip')}:{self._current_proxy_info.get('port')}"
+            return proxy_display(self._current_proxy_info)
         return "直连"
+
+    def get_httpx_proxy_url(self) -> Optional[str]:
+        """获取 httpx 使用的当前代理 URL。"""
+        return httpx_proxy_url(self._current_proxy_info)
 
     def is_using_direct(self) -> bool:
         """是否使用直连（无代理）"""

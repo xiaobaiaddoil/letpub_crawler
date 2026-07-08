@@ -2,7 +2,15 @@
 
 ## 日志文件位置
 
-所有日志文件存储在 `logs/` 目录下，自动创建。
+Docker 部署时日志目录按服务拆分，宿主机路径如下：
+
+```
+logs/
+├── app/       # Web/API 日志
+└── worker/    # 本机 worker 日志
+```
+
+非 Docker 运行时默认写入 `logs/`，也可以通过 `LOG_DIR` 指定。
 
 ## 日志文件分类
 
@@ -10,10 +18,11 @@
 
 ```
 logs/
-├── info_20260106.log       # INFO级别及以上的所有日志
-├── warning_20260106.log    # WARNING级别及以上的日志
-├── error_20260106.log      # ERROR级别及以上的日志（包含完整堆栈）
-└── debug_20260106.log      # DEBUG级别的详细日志（仅在DEBUG=true时生成）
+└── worker/
+    ├── info_20260106.log       # INFO级别及以上的所有日志
+    ├── warning_20260106.log    # WARNING级别及以上的日志
+    ├── error_20260106.log      # ERROR级别及以上的日志（包含完整堆栈）
+    └── debug_20260106.log      # DEBUG级别的详细日志（仅在DEBUG=true时生成）
 ```
 
 ## 日志级别说明
@@ -55,6 +64,14 @@ DEBUG=true
 
 # 生产环境（仅INFO及以上）
 DEBUG=false
+
+# 日志时区，默认 Asia/Shanghai
+TZ=Asia/Shanghai
+LOG_TIMEZONE=Asia/Shanghai
+
+# Docker compose 默认值
+APP_LOG_DIR=/app/logs/app
+WORKER_LOG_DIR=/app/logs/worker
 ```
 
 ## 日志轮转
@@ -88,17 +105,23 @@ except Exception as e:
 ### 查看日志
 
 ```bash
-# 查看最新的INFO日志
-tail -f logs/info_20260106.log
+# 查看 worker 最新的 INFO 日志
+tail -f logs/worker/info_20260106.log
 
-# 查看ERROR日志
-tail -f logs/error_20260106.log
+# 查看 worker ERROR 日志
+tail -f logs/worker/error_20260106.log
+
+# 查看 Web/API 日志
+tail -f logs/app/info_20260106.log
+
+# 也可以看 Docker stdout
+docker logs -f letpub-crawler-v2-worker-1
 
 # 搜索特定关键词
-grep "期刊名称" logs/info_20260106.log
+grep "期刊名称" logs/worker/info_20260106.log
 
 # 查看所有错误
-cat logs/error_*.log
+cat logs/worker/error_*.log
 ```
 
 ## 日志格式
@@ -152,3 +175,5 @@ info_handler = RotatingFileHandler(
 ### 找不到日志
 - 检查日志文件命名（按日期命名）
 - 确认是否启用了对应级别的日志
+- Docker 部署下 worker 日志在 `logs/worker/`，Web/API 日志在 `logs/app/`
+- 检查 `TZ`/`LOG_TIMEZONE` 是否为预期时区

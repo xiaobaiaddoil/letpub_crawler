@@ -9,6 +9,7 @@
         class="text-muted text-small"
         style="margin-top: 5px"
       ></div>
+      <div id="journal-detail-grid" class="journal-detail-grid"></div>
     </div>
     <div class="flex">
       <a href="/journals" class="btn btn-sm">返回列表</a>
@@ -71,6 +72,28 @@
     grid-template-columns: repeat(3, 1fr);
     gap: 20px;
     text-align: center;
+  }
+  .journal-detail-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px 18px;
+    margin-top: 16px;
+  }
+  .journal-detail-item {
+    min-width: 0;
+    padding: 10px 0;
+    border-top: 1px solid #edf0f2;
+  }
+  .journal-detail-label {
+    color: #777;
+    font-size: 12px;
+    margin-bottom: 4px;
+  }
+  .journal-detail-value {
+    color: #222;
+    font-size: 14px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
   }
   .comment-stats .stat-item {
     padding: 15px;
@@ -215,15 +238,90 @@
           return;
       }
       const journal = await response.json();
+      const detail = journal.detail_data || {};
 
       document.getElementById('journal-title').textContent = journal.name;
       document.getElementById('journal-info').innerHTML = `
-          ISSN: ${journal.issn || '-'} |
-          影响因子: ${journal.impact_factor || '-'} |
-          JCR分区: ${journal.jcr_partition || '-'}
+          期刊ID: ${journal.journal_id} |
+          ISSN: ${displayValue(journal.issn)} |
+          影响因子: ${displayValue(journal.impact_factor)} |
+          实时影响因子: ${displayValue(journal.impact_factor_realtime)}
       `;
+      renderJournalDetails(journal, detail);
       document.getElementById('letpub-link').href =
           `https://www.letpub.com.cn/index.php?journalid=${journalId}&page=journalapp&view=detail`;
+  }
+
+  function renderJournalDetails(journal, detail) {
+      const website = detail.website || detail['期刊官方网站'];
+      const submissionUrl = detail.submission_url || detail['期刊投稿网址'];
+      const fields = [
+          ['E-ISSN', journal.eissn || detail['E-ISSN']],
+          ['出版国家/地区', detail.country || detail['出版国家或地区']],
+          ['出版商', detail.publisher || detail['出版商']],
+          ['出版周期', detail.frequency || detail['出版周期']],
+          ['出版年份', detail['出版年份']],
+          ['出版语言', detail['出版语言']],
+          ['研究方向', detail['涉及的研究方向']],
+          ['h-index', detail['h-index']],
+          ['五年影响因子', detail.impact_factor_5year || detail['五年影响因子']],
+          ['自引率', journal.self_citation_rate || detail.self_citation_rate || detail['2024-2025自引率']],
+          ['JCR分区', journal.jcr_partition_summary],
+          ['CiteScore', journal.citescore_summary],
+          ['CAS预警', journal.cas_warning || detail.cas_warning || detail['期刊分区表预警名单']],
+          ['是否OA', detail.open_access || detail['是否OA开放访问']],
+          ['年文章数', detail['年文章数']],
+          ['审稿速度', journal.review_speed || detail.review_speed || detail['平均审稿速度']],
+          ['录用比例', journal.acceptance_rate || detail.acceptance_rate || detail['平均录用比例']],
+          ['页面评论数', journal.page_comment_count],
+          ['已抓评论数', journal.comment_count],
+          ['SCI收录', detail['SCI期刊收录coverage']],
+          ['期刊简介', detail['期刊简介']],
+          ['官网', website, normalizeUrl(website)],
+          ['投稿网址', submissionUrl, normalizeUrl(submissionUrl)],
+      ];
+
+      document.getElementById('journal-detail-grid').innerHTML = fields
+          .filter(([, value]) => value !== undefined && value !== null && value !== '')
+          .map(([label, value, link]) => {
+              const text = escapeHtml(displayValue(value, 180));
+              const body = link
+                  ? `<a href="${escapeAttribute(link)}" target="_blank">${text}</a>`
+                  : text;
+              return `
+                  <div class="journal-detail-item">
+                      <div class="journal-detail-label">${escapeHtml(label)}</div>
+                      <div class="journal-detail-value">${body}</div>
+                  </div>
+              `;
+          })
+          .join('');
+  }
+
+  function displayValue(value, limit = 80) {
+      if (value === undefined || value === null || value === '') return '-';
+      if (typeof value === 'object') value = JSON.stringify(value);
+      const text = String(value).trim();
+      return text.length > limit ? `${text.substring(0, limit)}...` : text;
+  }
+
+  function normalizeUrl(value) {
+      if (!value) return null;
+      const text = String(value).trim();
+      return /^https?:\/\//i.test(text) ? text : null;
+  }
+
+  function escapeHtml(value) {
+      return String(value)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+  }
+
+  function escapeAttribute(value) {
+      return escapeHtml(value);
   }
 
   async function loadAllComments() {

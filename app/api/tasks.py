@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from typing import List, Optional
 from pydantic import BaseModel
 from datetime import datetime, timedelta, timezone
@@ -19,6 +19,7 @@ class TaskResponse(BaseModel):
     target_url: Optional[str]
     status: str
     retry_count: int
+    max_retry: int
     error_message: Optional[str]
     worker_id: Optional[str]  # 执行该任务的worker标识
     locked_at: Optional[datetime]  # 任务锁定时间
@@ -34,10 +35,22 @@ class TaskStatsResponse(BaseModel):
     by_type: dict
     total: int
 
-@router.get("/", response_model=List[TaskResponse])
+
+class TaskListResponse(BaseModel):
+    total: int
+    page: int
+    size: int
+    items: List[TaskResponse]
+
+
+class FullRefreshRequest(BaseModel):
+    limit: Optional[int] = None
+
+@router.get("/", response_model=TaskListResponse)
 def list_tasks(
     status: Optional[str] = None,
     task_type: Optional[str] = None,
+    search: Optional[str] = Query(None, description="任务ID、目标、Worker或错误信息关键字"),
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db)
@@ -49,10 +62,27 @@ def list_tasks(
         query = query.filter(CrawlTask.status == status)
     if task_type:
         query = query.filter(CrawlTask.task_type == task_type)
+    if search_text := (search or "").strip():
+        pattern = f"%{search_text}%"
+        conditions = [
+            CrawlTask.target_id.ilike(pattern),
+            CrawlTask.target_url.ilike(pattern),
+            CrawlTask.worker_id.ilike(pattern),
+            CrawlTask.error_message.ilike(pattern),
+        ]
+        if search_text.isdigit():
+            conditions.append(CrawlTask.id == int(search_text))
+        query = query.filter(or_(*conditions))
 
+    total = query.count()
     offset = (page - 1) * size
     tasks = query.order_by(CrawlTask.created_at.desc()).offset(offset).limit(size).all()
-    return tasks
+    return {
+        "total": total,
+        "page": page,
+        "size": size,
+        "items": [TaskResponse.model_validate(t) for t in tasks],
+    }
 
 @router.get("/stats", response_model=TaskStatsResponse)
 def get_stats(db: Session = Depends(get_db)):
@@ -87,6 +117,15 @@ def retry_all_failed(db: Session = Depends(get_db)):
             retried += 1
     return {"message": f"已重试 {retried} 个任务"}
 
+@router.delete("/completed")
+def clear_completed_tasks(db: Session = Depends(get_db)):
+    """清理已完成任务"""
+    count = db.query(CrawlTask).filter(
+        CrawlTask.status == TaskStatus.COMPLETED.value
+    ).delete()
+    db.commit()
+    return {"message": f"已清理 {count} 个已完成任务"}
+
 @router.delete("/{task_id}")
 def delete_task(task_id: int, db: Session = Depends(get_db)):
     """删除任务"""
@@ -101,20 +140,12 @@ def delete_task(task_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"message": "任务已删除"}
 
-@router.delete("/completed")
-def clear_completed_tasks(db: Session = Depends(get_db)):
-    """清理已完成任务"""
-    count = db.query(CrawlTask).filter(
-        CrawlTask.status == TaskStatus.COMPLETED.value
-    ).delete()
-    db.commit()
-    return {"message": f"已清理 {count} 个已完成任务"}
-
 @router.post("/reset-detail/{journal_id}")
 def reset_detail_task(journal_id: int, db: Session = Depends(get_db)):
     """重置单个期刊的详情任务，用于重新爬取"""
     task_manager = TaskManager(db)
-    task_manager.reset_detail_task(journal_id)
+    if not task_manager.reset_detail_task(journal_id):
+        raise HTTPException(status_code=404, detail="期刊或详情任务不存在")
     return {"message": f"期刊 {journal_id} 的详情任务已重置"}
 
 @router.post("/reset-all-details")
@@ -123,6 +154,31 @@ def reset_all_detail_tasks(db: Session = Depends(get_db)):
     task_manager = TaskManager(db)
     count = task_manager.reset_all_detail_tasks()
     return {"message": f"已重置 {count} 个详情任务"}
+
+
+@router.post("/index-check")
+def create_index_check_task(db: Session = Depends(get_db)):
+    """创建新增期刊索引检测任务."""
+    task = TaskManager(db).create_index_check_task()
+    return {"message": "已创建新增期刊检测任务", "task_id": task.id}
+
+
+@router.post("/index-scan")
+def create_index_scan_tasks(db: Session = Depends(get_db)):
+    """根据最近一次索引检测结果创建列表扫描任务."""
+    count = TaskManager(db).create_index_scan_tasks()
+    return {"message": f"已创建/刷新 {count} 个列表扫描任务", "created_count": count}
+
+
+@router.post("/full-detail-refresh")
+def create_full_detail_refresh_tasks(
+    request: FullRefreshRequest | None = None,
+    db: Session = Depends(get_db),
+):
+    """创建全量详情刷新任务，用于记录指标变化."""
+    limit = request.limit if request else None
+    count = TaskManager(db).create_full_detail_refresh_tasks(limit=limit)
+    return {"message": f"已创建/刷新 {count} 个详情更新任务", "created_count": count}
 
 @router.post("/{task_id}/re-crawl")
 def re_crawl_task(task_id: int, db: Session = Depends(get_db)):
@@ -372,21 +428,7 @@ def create_comment_update_tasks(
         journal = db.query(Journal).filter(Journal.journal_id == jid).first()
         if journal:
             journal.comments_crawled = False
-            
-            # 重置或创建详情任务
-            task = db.query(CrawlTask).filter(
-                CrawlTask.task_type == TaskType.DETAIL.value,
-                CrawlTask.target_id == str(jid)
-            ).first()
-            
-            if task:
-                task.status = TaskStatus.PENDING.value
-                task.retry_count = 0
-                task.error_message = None
-                task.worker_id = None
-                task.locked_at = None
-            else:
-                task_manager.create_detail_task(jid)
+            task_manager.reset_or_create_detail_task(jid, journal.category_id)
             
             created += 1
     
@@ -414,27 +456,14 @@ def create_missing_info_update_tasks(db: Session = Depends(get_db)):
     
     # 创建任务
     created = 0
+    task_manager = TaskManager(db)
     for jid in journal_ids:
         journal = db.query(Journal).filter(Journal.journal_id == jid).first()
         if journal:
             # 重置爬取状态
             journal.detail_crawled = False
             journal.comments_crawled = False
-            
-            # 重置任务
-            task = db.query(CrawlTask).filter(
-                CrawlTask.task_type == TaskType.DETAIL.value,
-                CrawlTask.target_id == str(jid)
-            ).first()
-            
-            if task:
-                task.status = TaskStatus.PENDING.value
-                task.retry_count = 0
-                task.error_message = None
-                task.worker_id = None
-                task.locked_at = None
-                task.started_at = None
-                task.completed_at = None
+            task_manager.reset_or_create_detail_task(jid, journal.category_id)
             
             created += 1
     
@@ -458,25 +487,12 @@ def create_outdated_update_tasks(
     ).all()
     
     created = 0
+    task_manager = TaskManager(db)
     for journal in journals:
         # 重置爬取状态
         journal.detail_crawled = False
         journal.comments_crawled = False
-        
-        # 重置任务
-        task = db.query(CrawlTask).filter(
-            CrawlTask.task_type == TaskType.DETAIL.value,
-            CrawlTask.target_id == str(journal.journal_id)
-        ).first()
-        
-        if task:
-            task.status = TaskStatus.PENDING.value
-            task.retry_count = 0
-            task.error_message = None
-            task.worker_id = None
-            task.locked_at = None
-            task.started_at = None
-            task.completed_at = None
+        task_manager.reset_or_create_detail_task(journal.journal_id, journal.category_id)
         
         created += 1
     
@@ -494,6 +510,7 @@ def reset_tasks_by_journal(
     重置指定期刊的详情任务为待处理状态，同时重置期刊的爬取状态
     """
     reset_count = 0
+    task_manager = TaskManager(db)
     
     for jid in journal_ids:
         # 重置期刊爬取状态
@@ -501,21 +518,7 @@ def reset_tasks_by_journal(
         if journal:
             journal.detail_crawled = False
             journal.comments_crawled = False
-        
-        # 重置任务
-        task = db.query(CrawlTask).filter(
-            CrawlTask.task_type == TaskType.DETAIL.value,
-            CrawlTask.target_id == str(jid)
-        ).first()
-        
-        if task:
-            task.status = TaskStatus.PENDING.value
-            task.retry_count = 0
-            task.error_message = None
-            task.worker_id = None
-            task.locked_at = None
-            task.started_at = None
-            task.completed_at = None
+            task_manager.reset_or_create_detail_task(jid, journal.category_id)
             reset_count += 1
     
     db.commit()
@@ -536,24 +539,6 @@ def reset_task_by_single_journal(
     journal.detail_crawled = False
     journal.comments_crawled = False
     
-    # 重置任务
-    task = db.query(CrawlTask).filter(
-        CrawlTask.task_type == TaskType.DETAIL.value,
-        CrawlTask.target_id == str(journal_id)
-    ).first()
-    
-    if task:
-        task.status = TaskStatus.PENDING.value
-        task.retry_count = 0
-        task.error_message = None
-        task.worker_id = None
-        task.locked_at = None
-        task.started_at = None
-        task.completed_at = None
-        db.commit()
-        return {"message": f"期刊 {journal_id} 任务已重置"}
-    else:
-        # 任务不存在，创建新任务
-        task_manager = TaskManager(db)
-        task_manager.create_detail_task(journal_id, journal.category_id)
-        return {"message": f"期刊 {journal_id} 任务已创建"}
+    task_manager = TaskManager(db)
+    task = task_manager.reset_or_create_detail_task(journal_id, journal.category_id)
+    return {"message": f"期刊 {journal_id} 任务已重置", "task_id": task.id}

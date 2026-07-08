@@ -19,6 +19,7 @@ def test_clash_defaults_when_section_missing(tmp_path, monkeypatch):
     assert cfg.CLASH_CONTROLLER == "http://127.0.0.1:9097"
     assert cfg.CLASH_LISTENER_PORT == 30000
     assert cfg.CLASH_GROUP_NAME == "crawler-pool"
+    assert cfg.HOST_PROXY_HOST == ""
 
 
 def test_clash_reads_section(tmp_path, monkeypatch):
@@ -41,6 +42,18 @@ def test_clash_reads_section(tmp_path, monkeypatch):
     assert cfg.CLASH_SECRET == "abc"
     assert cfg.CLASH_LISTENER_PORT == 31000
     assert cfg.CLASH_GROUP_NAME == "g"
+
+
+def test_host_proxy_host_reads_yaml_and_env(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.config.CONFIG_DIR", tmp_path)
+    write_yaml(tmp_path / "app.yaml", {"proxy": {"host_proxy_host": "host.docker.internal"}})
+    write_yaml(tmp_path / "proxy.yaml", {})
+
+    cfg = Config()
+    assert cfg.HOST_PROXY_HOST == "host.docker.internal"
+
+    monkeypatch.setenv("HOST_PROXY_HOST", "172.17.0.1")
+    assert cfg.HOST_PROXY_HOST == "172.17.0.1"
 
 
 def test_env_overrides_yaml(tmp_path, monkeypatch):

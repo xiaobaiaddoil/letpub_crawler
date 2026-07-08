@@ -3,10 +3,97 @@ import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from tools.sync_clash import run_sync
+from tools.sync_clash import (
+    current_profile_signature,
+    run_sync,
+    runtime_has_crawler_listener,
+    sync_reason,
+)
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _write_basic_profile(tmp_clash_dir: Path):
+    (tmp_clash_dir / "profiles.yaml").write_text(
+        "current: AAA\nitems:\n  - uid: AAA\n    file: AAA.yaml\n",
+        encoding="utf-8",
+    )
+    (tmp_clash_dir / "profiles" / "AAA.yaml").write_text(
+        (FIXTURES / "sample_profile.yaml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+
+def _write_runtime_with_listener(tmp_clash_dir: Path, port: int = 30000):
+    (tmp_clash_dir / "clash-verge.yaml").write_text(
+        "mode: rule\n"
+        "proxy-groups:\n"
+        "  - name: crawler-pool\n"
+        "    type: load-balance\n"
+        "    proxies: [节点A]\n"
+        "listeners:\n"
+        "  - name: crawler-lb\n"
+        "    type: mixed\n"
+        f"    port: {port}\n"
+        "    listen: 127.0.0.1\n"
+        "    proxy: crawler-pool\n",
+        encoding="utf-8",
+    )
+
+
+def test_runtime_has_crawler_listener(tmp_clash_dir):
+    _write_runtime_with_listener(tmp_clash_dir)
+
+    assert runtime_has_crawler_listener(
+        tmp_clash_dir,
+        listener_port=30000,
+        group_name="crawler-pool",
+    ) is True
+    assert runtime_has_crawler_listener(
+        tmp_clash_dir,
+        listener_port=30001,
+        group_name="crawler-pool",
+    ) is False
+
+
+def test_sync_reason_detects_missing_runtime_listener(tmp_clash_dir, monkeypatch):
+    _write_basic_profile(tmp_clash_dir)
+    (tmp_clash_dir / "clash-verge.yaml").write_text("mode: rule\n", encoding="utf-8")
+    monkeypatch.setattr("tools.sync_clash.listener_reachable", lambda *_args, **_kwargs: True)
+
+    reason, signature = sync_reason(
+        tmp_clash_dir,
+        listener_port=30000,
+        group_name="crawler-pool",
+        previous_profile_signature=None,
+    )
+
+    assert reason == "clash-verge.yaml 缺少 crawler listener"
+    assert signature == current_profile_signature(tmp_clash_dir)
+
+
+def test_sync_reason_detects_profile_change(tmp_clash_dir, monkeypatch):
+    _write_basic_profile(tmp_clash_dir)
+    _write_runtime_with_listener(tmp_clash_dir)
+    monkeypatch.setattr("tools.sync_clash.listener_reachable", lambda *_args, **_kwargs: True)
+    previous = current_profile_signature(tmp_clash_dir)
+
+    (tmp_clash_dir / "profiles" / "AAA.yaml").write_text(
+        "proxies:\n"
+        "  - {name: 新节点, type: trojan, server: a, port: 1, password: x}\n",
+        encoding="utf-8",
+    )
+
+    reason, signature = sync_reason(
+        tmp_clash_dir,
+        listener_port=30000,
+        group_name="crawler-pool",
+        previous_profile_signature=previous,
+    )
+
+    assert reason == "Clash profile 已更新或已切换"
+    assert signature != previous
 
 
 @pytest.mark.asyncio

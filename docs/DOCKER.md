@@ -8,7 +8,7 @@ cp docker/.env.example .env
 docker compose up -d --build
 ```
 
-默认 `web` 镜像基于轻量 Python 镜像，不安装 Playwright 依赖、不下载浏览器层，适合主节点 Web/API 和数据库恢复。`worker` 镜像才基于 Playwright 官方 Python 镜像，并安装 `crawler` 额外依赖；只有构建 worker 时才会拉取较大的 `mcr.microsoft.com/playwright/python:v1.57.0-noble`。
+默认 `web` 镜像基于轻量 Python 镜像，不安装 Playwright 依赖、不下载浏览器层，适合主节点 Web/API 和数据库恢复。默认 `worker` 镜像使用 `worker-slim` 目标：复用 Python 基础镜像，安装 Playwright Python 依赖和 Debian `chromium-headless-shell`，避免拉取较大的 Playwright 官方基础镜像。仍可用 `worker-playwright` 目标构建官方 Playwright 基础镜像版本。
 
 ## 构建镜像
 
@@ -24,8 +24,11 @@ docker/build_image.sh
 # 构建主节点 Web/API 镜像，下载量最小
 BUILD_TARGET=web LETPUB_WEB_IMAGE=registry.example.com/letpub-crawler:web-20260707 docker/build_image.sh
 
-# 构建 worker 镜像，只有这个目标会下载 Playwright 大层
+# 构建 worker 镜像，默认使用 worker-slim，不拉 Playwright 官方大基础层
 BUILD_TARGET=worker LETPUB_WORKER_IMAGE=registry.example.com/letpub-crawler:worker-20260707 docker/build_image.sh
+
+# 构建基于 Playwright 官方基础镜像的 worker 版本
+BUILD_TARGET=worker-playwright LETPUB_WORKER_IMAGE=registry.example.com/letpub-crawler:worker-playwright-20260707 docker/build_image.sh
 
 # 构建后导出 tar.gz，适合没有镜像仓库时传到主节点
 SAVE_TAR=1 BUILD_TARGET=web LETPUB_WEB_IMAGE=letpub-crawler:web-20260707 docker/build_image.sh
@@ -44,6 +47,8 @@ LETPUB_WORKER_IMAGE=letpub-crawler:worker
 PYTHON_BASE_IMAGE=public.ecr.aws/docker/library/python:3.12-slim
 PLAYWRIGHT_BASE_IMAGE=mcr.microsoft.com/playwright/python:v1.57.0-noble
 UV_VERSION=0.11.15
+WORKER_BUILD_TARGET=worker-slim
+PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium-headless-shell
 ```
 
 如果主节点可以访问镜像仓库，优先推送镜像仓库；如果不能访问仓库，用 `SAVE_TAR=1` 导出后在主节点执行：
@@ -61,13 +66,13 @@ http://localhost:8000
 PostgreSQL 数据默认绑定到主节点宿主目录：
 
 ```text
-/home/cc/database/letpub_crawler/postgres
+/home/cc/database/letpub_crawler_v2/postgres
 ```
 
 如需换目录，改 `.env`：
 
 ```env
-POSTGRES_DATA_DIR=/data/letpub_crawler/postgres
+POSTGRES_DATA_DIR=/data/letpub_crawler_v2/postgres
 ```
 
 ## 迁移旧 PostgreSQL 数据
@@ -82,7 +87,7 @@ POSTGRES_DATA_DIR=/data/letpub_crawler/postgres
 
 ```bash
 OLD_PGDATA=/home/cc/database/pg/18/docker \
-POSTGRES_DB=letpub_crawler2 \
+POSTGRES_DB=letpub_crawler_v2 \
 POSTGRES_USER=letpub \
 POSTGRES_PASSWORD=change_me \
 docker/migrate_from_old_pgdata.sh
@@ -155,9 +160,18 @@ docker/stop_local_worker.sh
 ```env
 # 多副本本地 worker 请保持 LOCAL_WORKER_ID 为空，让容器自动生成唯一 ID。
 LOCAL_WORKER_ID=
-LOCAL_WORKER_CONCURRENCY=2
+LOCAL_WORKER_CONCURRENCY=4
 LOCAL_WORKER_SCALE=1
 ```
+
+本机 worker 在 `docker-compose.yml` 中使用 host 网络，默认通过宿主机端口连接主节点服务：
+
+```env
+WORKER_DATABASE_URL=postgresql://letpub:change_me@127.0.0.1:15432/letpub_crawler_v2
+WORKER_MASTER_URL=http://127.0.0.1:8000
+```
+
+这样 worker 可以访问只监听宿主机 `127.0.0.1` 的 Clash/本地代理端口。若改回非 host 网络，需要把本地代理绑定到容器可访问的地址，并设置 `HOST_PROXY_HOST`。
 
 `app`/`web` 负责创建任务和管理界面，worker 通过同一个 PostgreSQL 使用 `FOR UPDATE SKIP LOCKED` 领取任务并执行。多台 worker 机器部署时，只要使用 worker 镜像，并把 `DATABASE_URL` 指向主节点数据库、`MASTER_URL` 指向主节点 Web 地址即可。
 
@@ -165,10 +179,10 @@ LOCAL_WORKER_SCALE=1
 
 ```env
 LETPUB_WORKER_IMAGE=letpub-crawler:worker
-DATABASE_URL=postgresql://letpub:change_me@<master-ip>:15432/letpub_crawler2
+DATABASE_URL=postgresql://letpub:change_me@<master-ip>:15432/letpub_crawler_v2
 MASTER_URL=http://<master-ip>:8000
 CRAWLER_WORKER_ID=worker-01
-PARALLEL_WORKERS=3
+PARALLEL_WORKERS=4
 ```
 
 ```bash

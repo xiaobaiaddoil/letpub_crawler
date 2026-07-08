@@ -8,6 +8,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 from app.models.task import CrawlTask, TaskType, TaskStatus
 from app.models.journal import Journal
+from app.models.journal_index import CategoryIndexState
 from app.config import config
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,16 @@ class TaskManager:
         self.worker_id = worker_id or generate_worker_id()
         logger.info(f"TaskManager 初始化，worker_id: {self.worker_id}")
 
+    @staticmethod
+    def _reset_task_to_pending(task: CrawlTask):
+        task.status = TaskStatus.PENDING.value
+        task.retry_count = 0
+        task.error_message = None
+        task.worker_id = None
+        task.locked_at = None
+        task.started_at = None
+        task.completed_at = None
+
     def create_category_task(self) -> CrawlTask:
         """创建分类爬取任务"""
         # 检查是否已存在
@@ -64,46 +75,57 @@ class TaskManager:
         logger.info(f"创建分类任务: {task.id}")
         return task
 
-    def create_list_tasks(self, field_tag: str, total_pages: int) -> List[CrawlTask]:
-        """创建列表页爬取任务"""
+    def create_index_check_task(self) -> CrawlTask:
+        """创建新增期刊索引检测任务."""
+        return self.create_category_task()
+
+    def create_list_tasks(
+        self,
+        field_tag: str,
+        total_pages: int,
+        refresh_completed: bool = False,
+    ) -> List[CrawlTask]:
+        """创建列表页爬取任务.
+
+        Args:
+            field_tag: LetPub 分类 fieldtag。
+            total_pages: 当前分类页数。
+            refresh_completed: 为 True 时，已完成的列表页也会重新置为 pending。
+                这用于增量扫描：重新读取列表页，但列表执行阶段只会为新增期刊创建详情任务。
+        """
         tasks = []
         for page in range(1, total_pages + 1):
             target_id = f"{field_tag}:{page}"
+            url = f"{config.BASE_URL}/index.php?page=journalapp&view=researchfield&fieldtag={field_tag}&firstletter=&currentpage={page}"
+            extra_data = json.dumps({"field_tag": field_tag, "page": page})
 
-            # 检查是否已存在
             existing = self.db.query(CrawlTask).filter(
                 CrawlTask.task_type == TaskType.LIST.value,
-                CrawlTask.target_id == target_id,
-                CrawlTask.status == TaskStatus.COMPLETED.value
-            ).first()
+                CrawlTask.target_id == target_id
+            ).order_by(CrawlTask.id.desc()).first()
 
             if existing:
+                existing.target_url = url
+                existing.extra_data = extra_data
+                if existing.status in (TaskStatus.PENDING.value, TaskStatus.RUNNING.value):
+                    tasks.append(existing)
+                elif refresh_completed or existing.status == TaskStatus.FAILED.value:
+                    self._reset_task_to_pending(existing)
+                    tasks.append(existing)
                 continue
 
-            # 检查是否有未完成的任务
-            pending = self.db.query(CrawlTask).filter(
-                CrawlTask.task_type == TaskType.LIST.value,
-                CrawlTask.target_id == target_id,
-                CrawlTask.status.in_([TaskStatus.PENDING.value, TaskStatus.RUNNING.value])
-            ).first()
-
-            if pending:
-                tasks.append(pending)
-                continue
-
-            url = f"{config.BASE_URL}/index.php?page=journalapp&view=researchfield&fieldtag={field_tag}&firstletter=&currentpage={page}"
             task = CrawlTask(
                 task_type=TaskType.LIST.value,
                 target_id=target_id,
                 target_url=url,
                 status=TaskStatus.PENDING.value,
-                extra_data=json.dumps({"field_tag": field_tag, "page": page})
+                extra_data=extra_data
             )
             self.db.add(task)
             tasks.append(task)
 
         self.db.commit()
-        logger.info(f"创建 {len(tasks)} 个列表任务 (分类: {field_tag})")
+        logger.info(f"创建/刷新 {len(tasks)} 个列表任务 (分类: {field_tag}, refresh_completed={refresh_completed})")
         return tasks
 
     def create_detail_task(self, journal_id: int, category_id: int = None) -> Optional[CrawlTask]:
@@ -118,19 +140,20 @@ class TaskManager:
 
         target_id = str(journal_id)
 
-        # 检查是否有已完成或进行中的任务
         existing = self.db.query(CrawlTask).filter(
             CrawlTask.task_type == TaskType.DETAIL.value,
-            CrawlTask.target_id == target_id,
-            CrawlTask.status.in_([
-                TaskStatus.COMPLETED.value,
-                TaskStatus.PENDING.value,
-                TaskStatus.RUNNING.value
-            ])
-        ).first()
+            CrawlTask.target_id == target_id
+        ).order_by(CrawlTask.id.desc()).first()
 
         if existing:
-            return existing if existing.status != TaskStatus.COMPLETED.value else None
+            if existing.status in (TaskStatus.PENDING.value, TaskStatus.RUNNING.value):
+                return existing
+            self._reset_task_to_pending(existing)
+            existing.target_url = f"{config.BASE_URL}/index.php?journalid={journal_id}&page=journalapp&view=detail"
+            existing.extra_data = json.dumps({"journal_id": journal_id, "category_id": category_id})
+            self.db.commit()
+            self.db.refresh(existing)
+            return existing
 
         url = f"{config.BASE_URL}/index.php?journalid={journal_id}&page=journalapp&view=detail"
         task = CrawlTask(
@@ -144,6 +167,71 @@ class TaskManager:
         self.db.commit()
         self.db.refresh(task)
         return task
+
+    def reset_or_create_detail_task(self, journal_id: int, category_id: int = None) -> CrawlTask:
+        """重置或创建详情任务，用于增量更新和手动重爬.
+
+        与 create_detail_task 不同，本方法不会因为 Journal.detail_crawled=True 而跳过。
+        如果任务正在运行，则只返回现有任务，避免把正在执行的任务重置回 pending。
+        """
+        target_id = str(journal_id)
+        url = f"{config.BASE_URL}/index.php?journalid={journal_id}&page=journalapp&view=detail"
+        extra_data = json.dumps({"journal_id": journal_id, "category_id": category_id})
+
+        task = self.db.query(CrawlTask).filter(
+            CrawlTask.task_type == TaskType.DETAIL.value,
+            CrawlTask.target_id == target_id
+        ).order_by(CrawlTask.id.desc()).first()
+
+        if task:
+            task.target_url = url
+            task.extra_data = extra_data
+            if task.status != TaskStatus.RUNNING.value:
+                self._reset_task_to_pending(task)
+            self.db.commit()
+            self.db.refresh(task)
+            return task
+
+        task = CrawlTask(
+            task_type=TaskType.DETAIL.value,
+            target_id=target_id,
+            target_url=url,
+            status=TaskStatus.PENDING.value,
+            extra_data=extra_data
+        )
+        self.db.add(task)
+        self.db.commit()
+        self.db.refresh(task)
+        return task
+
+    def create_index_scan_tasks(self, statuses: tuple[str, ...] = ("changed", "missing_index")) -> int:
+        """为索引检测发现差异的分类创建列表扫描任务."""
+        states = self.db.query(CategoryIndexState).filter(
+            CategoryIndexState.status.in_(statuses),
+            CategoryIndexState.total_pages > 0,
+        ).all()
+
+        created = 0
+        for state in states:
+            created += len(self.create_list_tasks(
+                state.field_tag,
+                state.total_pages,
+                refresh_completed=True,
+            ))
+        return created
+
+    def create_full_detail_refresh_tasks(self, limit: int | None = None) -> int:
+        """为所有已知期刊创建详情刷新任务，用于全量指标更新."""
+        query = self.db.query(Journal).order_by(Journal.updated_at.asc().nullsfirst())
+        if limit:
+            query = query.limit(limit)
+
+        created = 0
+        for journal in query.all():
+            task = self.reset_or_create_detail_task(journal.journal_id, journal.category_id)
+            if task.status != TaskStatus.RUNNING.value:
+                created += 1
+        return created
 
     def get_pending_tasks(self, task_type: str = None, limit: int = 10) -> List[CrawlTask]:
         """获取待处理任务（旧方法，保留兼容性）"""
@@ -345,22 +433,6 @@ class TaskManager:
 
     def reset_detail_task(self, journal_id: int) -> bool:
         """重置期刊详情任务状态，用于重新爬取"""
-        target_id = str(journal_id)
-
-        # 更新任务状态为pending
-        task = self.db.query(CrawlTask).filter(
-            CrawlTask.task_type == TaskType.DETAIL.value,
-            CrawlTask.target_id == target_id
-        ).first()
-
-        if task:
-            task.status = TaskStatus.PENDING.value
-            task.retry_count = 0
-            task.error_message = None
-            task.started_at = None
-            task.completed_at = None
-
-        # 同时重置期刊的爬取状态
         journal = self.db.query(Journal).filter(
             Journal.journal_id == journal_id
         ).first()
@@ -368,31 +440,32 @@ class TaskManager:
         if journal:
             journal.detail_crawled = False
             journal.comments_crawled = False
+            self.reset_or_create_detail_task(journal_id, journal.category_id)
+            logger.info(f"重置期刊 {journal_id} 的详情任务")
+            return True
 
-        self.db.commit()
-        logger.info(f"重置期刊 {journal_id} 的详情任务")
-        return True
+        task = self.db.query(CrawlTask).filter(
+            CrawlTask.task_type == TaskType.DETAIL.value,
+            CrawlTask.target_id == str(journal_id)
+        ).first()
+        if task:
+            self._reset_task_to_pending(task)
+            self.db.commit()
+            logger.info(f"重置孤立详情任务: journal_id={journal_id}")
+            return True
+
+        logger.warning(f"重置详情任务失败，期刊不存在且无任务: journal_id={journal_id}")
+        return False
 
     def reset_all_detail_tasks(self) -> int:
         """重置所有已完成的详情任务，用于全量重新爬取"""
-        # 重置所有详情任务
-        count = self.db.query(CrawlTask).filter(
-            CrawlTask.task_type == TaskType.DETAIL.value,
-            CrawlTask.status == TaskStatus.COMPLETED.value
-        ).update({
-            CrawlTask.status: TaskStatus.PENDING.value,
-            CrawlTask.retry_count: 0,
-            CrawlTask.error_message: None,
-            CrawlTask.started_at: None,
-            CrawlTask.completed_at: None
-        })
+        journals = self.db.query(Journal).all()
+        count = 0
+        for journal in journals:
+            journal.detail_crawled = False
+            journal.comments_crawled = False
+            self.reset_or_create_detail_task(journal.journal_id, journal.category_id)
+            count += 1
 
-        # 重置所有期刊的爬取状态
-        self.db.query(Journal).update({
-            Journal.detail_crawled: False,
-            Journal.comments_crawled: False
-        })
-
-        self.db.commit()
-        logger.info(f"重置 {count} 个详情任务")
+        logger.info(f"重置/创建 {count} 个详情任务")
         return count

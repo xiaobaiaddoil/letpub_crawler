@@ -789,13 +789,7 @@ class DetailCrawler(BaseCrawler):
         url_with_params = f"{api_url}?action={params['action']}&journalid={params['journalid']}&sorttype={params['sorttype']}&page={params['page']}"
 
         # 构建代理URL（复用当前代理，不重新获取）
-        proxy_url = None
-        if self._current_proxy_info:
-            p = self._current_proxy_info
-            if p.get("username") and p.get("password"):
-                proxy_url = f"http://{p['username']}:{p['password']}@{p['ip']}:{p['port']}"
-            else:
-                proxy_url = f"http://{p['ip']}:{p['port']}"
+        proxy_url = self.get_httpx_proxy_url()
 
         try:
             async with httpx.AsyncClient(timeout=30.0, proxy=proxy_url) as client:

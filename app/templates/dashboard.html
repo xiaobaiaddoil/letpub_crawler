@@ -17,7 +17,7 @@
     </div>
   </div>
   <div class="flex mt-2">
-    <button class="btn btn-primary" onclick="startCrawler()">开始爬取</button>
+    <button class="btn btn-primary" onclick="startCrawler()">启动任务</button>
     {% if run_mode != 'master' %}
     <button class="btn btn-warning" onclick="pauseCrawler()">暂停</button>
     <button class="btn btn-success" onclick="resumeCrawler()">恢复</button>
@@ -114,7 +114,7 @@
     const result = await apiCall("/api/crawler/start");
     if (result) {
       updateStatus("运行中", "status-running");
-      alert("爬取任务已创建");
+      alert(result.message || "任务消费已启动");
     }
   }
 

@@ -121,7 +121,7 @@ class Config:
 
     @property
     def PARALLEL_WORKERS(self) -> int:
-        return env_int("PARALLEL_WORKERS", default=get_nested(self._app_config, "crawler", "parallel_workers", default=3))
+        return env_int("PARALLEL_WORKERS", default=get_nested(self._app_config, "crawler", "parallel_workers", default=4))
     
     @property
     def WORKER_ID(self) -> str:
@@ -185,6 +185,13 @@ class Config:
             self._app_config, "clash", "group_name",
             default="crawler-pool",
         )))
+
+    @property
+    def HOST_PROXY_HOST(self) -> str:
+        return str(env_value("HOST_PROXY_HOST", "DOCKER_HOST_PROXY_HOST", default=get_nested(
+            self._app_config, "proxy", "host_proxy_host",
+            default="",
+        )) or "")
 
     @property
     def PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH(self) -> str:

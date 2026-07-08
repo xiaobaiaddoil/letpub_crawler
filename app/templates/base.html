@@ -304,9 +304,11 @@
     <main class="container">{% block content %}{% endblock %}</main>
     <script>
       // 通用的fetch封装
-      async function apiCall(url, method = "POST") {
+      async function apiCall(url, options = "POST") {
         try {
-          const response = await fetch(url, { method });
+          const fetchOptions =
+            typeof options === "string" ? { method: options } : options;
+          const response = await fetch(url, fetchOptions);
           const data = await response.json();
           return data;
         } catch (error) {

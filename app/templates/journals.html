@@ -17,7 +17,7 @@
       <input
         type="text"
         id="search-input"
-        placeholder="搜索期刊名称/ISSN..."
+        placeholder="搜索期刊ID/名称/ISSN..."
         onkeyup="searchJournals(event)"
       />
       <button class="btn btn-sm" onclick="loadJournals(1)">搜索</button>
@@ -150,9 +150,7 @@
             <tr>
                 <td>${j.journal_id}</td>
                 <td>
-                    <a href="https://www.letpub.com.cn/index.php?journalid=${
-                      j.journal_id
-                    }&page=journalapp&view=detail" target="_blank">
+                    <a href="/journals/${j.journal_id}/comments">
                         ${
                           j.name.length > 50
                             ? j.name.substring(0, 50) + "..."
@@ -162,23 +160,17 @@
                 </td>
                 <td>${j.issn || "-"}</td>
                 <td>${j.impact_factor || "-"}</td>
-                <td>${
-                  j.jcr_partition ? j.jcr_partition.substring(0, 20) : "-"
-                }</td>
-                <td>${
-                  j.cas_partition ? j.cas_partition.substring(0, 20) : "-"
-                }</td>
+                <td>${displayText(j.jcr_partition_summary || j.jcr_partition)}</td>
+                <td>${displayText(j.cas_partition_summary || j.cas_partition)}</td>
                 <td>
                     <a href="/journals/${j.journal_id}/comments">
-                        ${j.comments_crawled ? "查看" : "-"}
+                        ${j.comment_count || 0}
                     </a>
                 </td>
                 <td>
-                    <span class="status ${
-                      j.detail_crawled ? "status-completed" : "status-pending"
-                    }">
-                        ${j.detail_crawled ? "已爬取" : "未爬取"}
-                    </span>
+                    <a href="/journals/${j.journal_id}/comments">
+                        ${j.detail_crawled ? "查看详情" : "未爬取"}
+                    </a>
                 </td>
             </tr>
         `
@@ -229,6 +221,13 @@
     }
 
     pagination.innerHTML = html;
+  }
+
+  function displayText(value, limit = 48) {
+    if (!value) return "-";
+    const text = String(value).trim();
+    if (!text) return "-";
+    return text.length > limit ? `${text.substring(0, limit)}...` : text;
   }
 </script>
 {% endblock %}
