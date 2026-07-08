@@ -44,6 +44,11 @@ def test_normalize_info_extracts_impact_factor_float(crawler):
     assert result["impact_factor"] == 3.5
 
 
+def test_normalize_info_extracts_latest_if_float(crawler):
+    result = crawler._normalize_info({"2025-2026最新IF（数据来源于网友提供）": "4.199"})
+    assert result["impact_factor"] == 4.199
+
+
 def test_normalize_info_impact_factor_no_number_becomes_none(crawler):
     result = crawler._normalize_info({"最新影响因子": "暂无"})
     assert result["impact_factor"] is None
@@ -89,6 +94,36 @@ def test_validate_min_fields_passes(crawler):
 def test_validate_with_required_field_passes(crawler):
     info = {"期刊ISSN": "1234-5678", "b": 2, "c": 3, "d": 4, "e": 5}
     crawler._validate_basic_info(info, 1)  # should not raise
+
+
+# ── HTTP HTML detail extraction ───────────────────────────────────────────────
+
+SAMPLE_DETAIL_HTML = """
+<html><body>
+  <div id="yxyz_content">
+    <table><tr><td>not target</td></tr></table>
+    <table>
+      <tr><td colspan="2">基本信息</td></tr>
+      <tr><td>期刊名字</td><td>Example Journal<script>ignore()</script></td></tr>
+      <tr><td>期刊ISSN：</td><td>1234-5678</td></tr>
+      <tr><td>2025-2026最新IF（数据来源于网友提供）</td><td>4.199</td></tr>
+      <tr><td>出版商</td><td>Example Publisher</td></tr>
+      <tr><td>CiteScore</td><td><table>
+        <tr><td>CiteScore</td><td>9.80</td></tr>
+      </table></td></tr>
+    </table>
+  </div>
+</body></html>
+"""
+
+
+def test_extract_basic_info_from_http_html(crawler):
+    result = crawler._extract_basic_info_from_html(SAMPLE_DETAIL_HTML)
+    assert result["期刊名字"] == "Example Journal"
+    assert result["issn"] == "1234-5678"
+    assert result["impact_factor"] == 4.199
+    assert result["publisher"] == "Example Publisher"
+    assert result["CiteScore"]["tables"][0]["CiteScore"] == "9.80"
 
 
 # ── _parse_comment_from_api ───────────────────────────────────────────────────

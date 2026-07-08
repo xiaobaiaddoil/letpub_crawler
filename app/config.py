@@ -109,6 +109,16 @@ class Config:
     @property
     def CRAWL_DELAY_MAX(self) -> int:
         return env_int("CRAWL_DELAY_MAX", default=get_nested(self._app_config, "crawler", "delay_max", default=8))
+
+    @property
+    def CRAWLER_FETCH_MODE(self) -> str:
+        mode = str(env_value(
+            "CRAWLER_FETCH_MODE",
+            default=get_nested(self._app_config, "crawler", "fetch_mode", default="http"),
+        ) or "http").lower()
+        if mode not in {"http", "browser"}:
+            return "http"
+        return mode
     
     @property
     def MAX_RETRY(self) -> int:

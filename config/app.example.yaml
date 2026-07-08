@@ -27,6 +27,10 @@ database:
 
 # 爬虫配置
 crawler:
+  # 爬取后端：
+  # http: 默认，使用登录会话 + HTTP/API 请求，速度更快
+  # browser: 临时回退到 Playwright 浏览器解析
+  fetch_mode: http
   delay_min: 3 # 请求最小延迟（秒）
   delay_max: 8 # 请求最大延迟（秒）
   max_retry: 3 # 任务最大重试次数

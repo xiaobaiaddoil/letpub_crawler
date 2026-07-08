@@ -2,10 +2,10 @@ import re
 import logging
 import json
 import math
-import httpx
-from typing import Dict, List, Optional, Any, Tuple
+import copy
+from typing import Dict, List, Optional, Any
 import uuid
-import lxml.etree
+import lxml.html
 from app.crawler.base import BaseCrawler
 from app.config import config
 
@@ -56,12 +56,222 @@ class DetailCrawler(BaseCrawler):
         """构建详情页URL"""
         return f"{config.BASE_URL}/index.php?journalid={journal_id}&page=journalapp&view=detail"
 
+    @staticmethod
+    def _clean_html_text(text: str) -> str:
+        return re.sub(r"\s+", " ", (text or "").strip())
+
+    @staticmethod
+    def _is_hidden_html_element(element) -> bool:
+        style = (element.get("style") or "").replace(" ", "").lower()
+        return "display:none" in style or "visibility:hidden" in style
+
+    @staticmethod
+    def _is_interactive_html_ancestor(element, stop_element) -> bool:
+        current = element
+        while current is not None and current is not stop_element:
+            tag = (getattr(current, "tag", "") or "").lower()
+            if tag in {"a", "button"}:
+                return True
+            if current.get("href") or current.get("onclick") or current.get("onmousedown") or current.get("onmouseup"):
+                return True
+            style = (current.get("style") or "").replace(" ", "").lower()
+            if "cursor:pointer" in style:
+                return True
+            current = current.getparent()
+        return False
+
+    def _extract_html_element_text(self, element, exclude_tables: bool = True) -> str:
+        """从 lxml 元素提取文本，尽量模拟浏览器版本的过滤规则。"""
+        if element is None:
+            return ""
+
+        cloned = copy.deepcopy(element)
+        for bad in cloned.xpath(".//script|.//style|.//noscript"):
+            parent = bad.getparent()
+            if parent is not None:
+                parent.remove(bad)
+
+        for hidden in cloned.xpath(".//*"):
+            if self._is_hidden_html_element(hidden):
+                parent = hidden.getparent()
+                if parent is not None:
+                    parent.remove(hidden)
+
+        if exclude_tables:
+            for table in cloned.xpath(".//table"):
+                parent = table.getparent()
+                if parent is not None:
+                    parent.remove(table)
+
+        normal_text = []
+        interactive_text = []
+        for text_node in cloned.xpath(".//text()"):
+            text = self._clean_html_text(str(text_node))
+            if not text:
+                continue
+            parent = text_node.getparent()
+            if parent is not None and self._is_interactive_html_ancestor(parent, cloned):
+                interactive_text.append(text)
+            else:
+                normal_text.append(text)
+
+        selected = normal_text or interactive_text
+        return self._clean_html_text(" ".join(selected))
+
+    def _find_detail_main_table(self, doc):
+        """定位详情页基本信息主表，避免依赖浏览器 DOM 下的固定表格序号。"""
+        scope = doc.xpath('//*[@id="yxyz_content"]')
+        tables = (scope[0].xpath(".//table") if scope else doc.xpath("//table"))
+
+        best_table = None
+        best_score = -1
+        required_markers = ("期刊名字", "期刊ISSN")
+        optional_markers = (
+            "基本信息", "出版商", "出版国家", "出版周期", "平均审稿速度",
+            "最新IF", "影响因子", "JCR", "期刊官方网站",
+        )
+
+        for table in tables:
+            table_text = self._clean_html_text(table.text_content())
+            if not all(marker in table_text for marker in required_markers):
+                continue
+
+            rows = table.xpath("./tbody/tr") or table.xpath("./tr")
+            score = len(rows) + sum(10 for marker in optional_markers if marker in table_text)
+            if score > best_score:
+                best_score = score
+                best_table = table
+
+        return best_table
+
+    def _extract_html_nested_table(self, table) -> Any:
+        """提取 lxml 嵌套表格。"""
+        try:
+            rows = table.xpath("./tbody/tr") or table.xpath("./tr")
+            if not rows:
+                return {}
+
+            first_cells = rows[0].xpath("./td|./th")
+            has_header = bool(rows[0].xpath("./th"))
+
+            if len(first_cells) > 2 or has_header:
+                headers = []
+                data_list = []
+                for row_idx, row in enumerate(rows):
+                    cells = row.xpath("./td|./th")
+                    if row_idx == 0:
+                        headers = [
+                            self._extract_html_element_text(cell) or f"col_{i}"
+                            for i, cell in enumerate(cells)
+                        ]
+                        continue
+
+                    row_data = {}
+                    for i, cell in enumerate(cells):
+                        nested_tables = cell.xpath("./table")
+                        if nested_tables:
+                            nested_values = [self._extract_html_nested_table(t) for t in nested_tables]
+                            value = nested_values[0] if len(nested_values) == 1 else nested_values
+                        else:
+                            value = self._extract_html_element_text(cell)
+                        row_data[headers[i] if i < len(headers) else f"col_{i}"] = value
+                    if row_data:
+                        data_list.append(row_data)
+                return data_list
+
+            nested_data = {}
+            for row_idx, row in enumerate(rows):
+                cells = row.xpath("./td|./th")
+                if len(cells) >= 2:
+                    key = self._normalize_key(self._extract_html_element_text(cells[0]))
+                    if not key:
+                        continue
+                    nested_tables = cells[1].xpath("./table")
+                    if nested_tables:
+                        nested_values = [self._extract_html_nested_table(t) for t in nested_tables]
+                        value = nested_values[0] if len(nested_values) == 1 else nested_values
+                    else:
+                        value = self._extract_html_element_text(cells[1])
+                    nested_data[key] = value
+                elif len(cells) == 1:
+                    text = self._extract_html_element_text(cells[0])
+                    if text and row_idx == 0:
+                        nested_data["_title"] = text
+                    elif text:
+                        nested_data[f"_row_{row_idx}"] = text
+            return nested_data
+        except Exception as e:
+            logger.warning(f"提取HTML嵌套表格失败: {e}")
+            return {}
+
+    def _extract_basic_info_from_html(self, html: str) -> Dict:
+        """从详情页 HTML 中提取基本信息。"""
+        info = {}
+        try:
+            doc = lxml.html.fromstring(html)
+            table = self._find_detail_main_table(doc)
+            if table is None:
+                logger.warning("未找到详情页基本信息主表")
+                return info
+
+            rows = table.xpath("./tbody/tr") or table.xpath("./tr")
+            for row in rows:
+                cells = row.xpath("./td")
+                if len(cells) < 2:
+                    continue
+
+                key = self._normalize_key(self._extract_html_element_text(cells[0]))
+                if not key:
+                    continue
+
+                value_cell = cells[1]
+                nested_tables = value_cell.xpath("./table")
+                value_cell_text = self._extract_html_element_text(value_cell)
+
+                if nested_tables:
+                    value_tables = [self._extract_html_nested_table(t) for t in nested_tables]
+                    value = {
+                        "text": value_cell_text,
+                        "tables": value_tables,
+                    }
+                else:
+                    value = value_cell_text
+
+                if key and value:
+                    info[key] = value
+
+            info = self._normalize_info(info)
+            logger.info(f"HTTP提取基本信息: {info.get('期刊名字', 'Unknown')}, 共 {len(info)} 个字段")
+        except Exception as e:
+            logger.error(f"HTTP提取基本信息失败: {e}")
+            import traceback
+            traceback.print_exc()
+
+        return info
+
+    def _basic_info_requires_login(self, info: Dict) -> bool:
+        """判断详情字段是否仍是未登录占位文案。"""
+        locked_markers = ("注册 或 登录 后", "注册或登录后", "登录 后，查看")
+        for value in info.values():
+            if isinstance(value, str) and any(marker in value for marker in locked_markers):
+                return True
+            if isinstance(value, dict):
+                text = value.get("text")
+                if isinstance(text, str) and any(marker in text for marker in locked_markers):
+                    return True
+        return False
+
     async def crawl(self, journal_id: int, validate: bool = True) -> Dict:
+        if config.CRAWLER_FETCH_MODE == "browser":
+            return await self._crawl_with_browser(journal_id, validate=validate)
+        return await self._crawl_with_http(journal_id, validate=validate)
+
+    async def _crawl_with_http(self, journal_id: int, validate: bool = True) -> Dict:
         """爬取期刊详情
 
         流程：
-        1. 用代理（无 Cookie）爬取基本信息表格
-        2. 获取 Cookie，用同一代理爬取评论（httpx）
+        1. 用 HTTP 获取详情页 HTML 并解析基本信息表格
+        2. 获取/刷新登录 Cookie，用同一 HTTP 会话爬取评论 API
 
         Args:
             journal_id: 期刊ID
@@ -75,9 +285,15 @@ class DetailCrawler(BaseCrawler):
         """
         url = self._build_detail_url(journal_id)
 
-        success = await self.goto(url)
-        if not success:
-            raise Exception(f"无法访问详情页: {url}")
+        # 先建立登录会话。详情页部分字段也依赖登录态。
+        cookie_value = await self.get_cookie_for_http()
+
+        response = await self.request_http("GET", url, headers={
+            "User-Agent": config.USER_AGENTS[0],
+            "Referer": f"{config.BASE_URL}/index.php?page=journalapp",
+        })
+        if response.status_code != 200:
+            raise Exception(f"无法访问详情页: {url}, HTTP {response.status_code}")
 
         detail = {
             "journal_id": journal_id,
@@ -85,19 +301,24 @@ class DetailCrawler(BaseCrawler):
             "comments": []
         }
 
-        # 提取基本信息（表格结构，无需 Cookie）
-        detail["basic_info"] = await self._extract_basic_info()
+        # 提取基本信息（HTTP HTML）
+        detail["basic_info"] = self._extract_basic_info_from_html(response.text)
+
+        if self._basic_info_requires_login(detail["basic_info"]):
+            logger.warning(f"[详情] 期刊 {journal_id} 详情字段仍为未登录占位，强制登录后重试")
+            refreshed_cookie = await self.get_cookie_for_http(force_login=True)
+            if refreshed_cookie:
+                cookie_value = refreshed_cookie
+                response = await self.request_http("GET", url, headers={
+                    "User-Agent": config.USER_AGENTS[0],
+                    "Referer": f"{config.BASE_URL}/index.php?page=journalapp",
+                })
+                if response.status_code == 200:
+                    detail["basic_info"] = self._extract_basic_info_from_html(response.text)
 
         # 校验数据完整性
         if validate:
             self._validate_basic_info(detail["basic_info"], journal_id)
-
-        # 获取 Cookie（优先从池，否则本地配置）
-        cookie_value = await self._get_cookie_from_pool()
-        if not cookie_value:
-            cookie_value = config.LETPUB_COOKIE or None
-            if cookie_value:
-                logger.info("[评论] 使用本地配置 Cookie 爬取评论")
 
         if not cookie_value:
             logger.warning(f"[评论] 期刊 {journal_id} 无可用 Cookie，跳过评论爬取")
@@ -111,6 +332,58 @@ class DetailCrawler(BaseCrawler):
         detail["comments"] = comments
 
         # 将评论数量信息存入 basic_info
+        detail["basic_info"]["comment_count"] = comment_info.get("total_count", 0)
+        detail["basic_info"]["comment_pages"] = comment_info.get("total_pages", 0)
+        detail["basic_info"]["crawled_comment_count"] = comment_info.get("crawled_count", 0)
+
+        return detail
+
+    async def _crawl_with_browser(self, journal_id: int, validate: bool = True) -> Dict:
+        """使用浏览器后端爬取期刊详情（兼容回退）。"""
+        url = self._build_detail_url(journal_id)
+
+        cookie_value = await self.get_cookie_for_http()
+        if cookie_value and self.context:
+            cookies = self._parse_cookies(cookie_value)
+            if cookies:
+                await self.context.add_cookies(cookies)
+
+        success = await self.goto(url)
+        if not success:
+            raise Exception(f"无法访问详情页: {url}")
+
+        detail = {
+            "journal_id": journal_id,
+            "basic_info": {},
+            "comments": []
+        }
+
+        detail["basic_info"] = await self._extract_basic_info()
+
+        if self._basic_info_requires_login(detail["basic_info"]):
+            logger.warning(f"[详情] 期刊 {journal_id} 浏览器详情字段仍为未登录占位，强制登录后重试")
+            refreshed_cookie = await self.get_cookie_for_http(force_login=True)
+            if refreshed_cookie and self.context:
+                cookies = self._parse_cookies(refreshed_cookie)
+                if cookies:
+                    await self.context.add_cookies(cookies)
+                cookie_value = refreshed_cookie
+                success = await self.goto(url)
+                if success:
+                    detail["basic_info"] = await self._extract_basic_info()
+
+        if validate:
+            self._validate_basic_info(detail["basic_info"], journal_id)
+
+        if not cookie_value:
+            logger.warning(f"[评论] 期刊 {journal_id} 无可用 Cookie，跳过评论爬取")
+            detail["basic_info"]["comment_count"] = 0
+            detail["basic_info"]["comment_pages"] = 0
+            detail["basic_info"]["crawled_comment_count"] = 0
+            return detail
+
+        comments, comment_info = await self._fetch_comments_from_api(journal_id, cookie_value)
+        detail["comments"] = comments
         detail["basic_info"]["comment_count"] = comment_info.get("total_count", 0)
         detail["basic_info"]["comment_pages"] = comment_info.get("total_pages", 0)
         detail["basic_info"]["crawled_comment_count"] = comment_info.get("crawled_count", 0)
@@ -522,9 +795,9 @@ class DetailCrawler(BaseCrawler):
             r'E-ISSN|EISSN|电子ISSN': 'eissn',
 
             # 影响因子相关
-            r'最新影响因子': 'impact_factor',
+            r'最新影响因子|最新IF': 'impact_factor',
             r'实时影响因子|即时影响因子': 'impact_factor_realtime',
-            r'5年影响因子|五年影响因子': 'impact_factor_5year',
+            r'5年影响因子|五年影响因子|五年IF': 'impact_factor_5year',
             r'自引率': 'self_citation_rate',
 
             # 分区相关
@@ -576,8 +849,7 @@ class DetailCrawler(BaseCrawler):
         """通过AJAX API获取评论数据。
 
         同一 journal_id 的所有评论页复用同一代理（self._current_proxy_info）。
-        Cookie 由调用方传入，不在此处重新获取。
-        当检测到每页只有1条评论时，主动更换Cookie重试。
+        Cookie 由调用方传入；检测到未登录时通过接口登录刷新 Cookie 后重试一次。
 
         Returns:
             tuple: (comments列表, comment_info字典)
@@ -585,6 +857,7 @@ class DetailCrawler(BaseCrawler):
         """
         comments = []
         cookie_refresh_attempted = False
+        page_size = 10
 
         # 评论信息
         comment_info = {
@@ -594,26 +867,15 @@ class DetailCrawler(BaseCrawler):
         }
 
         try:
-            comment_ele = self.page.locator("xpath=//td/h2/font")
-            comment_nums = await comment_ele.inner_text()
-            total_comments = int(comment_nums)
-            page_size = 10
-            total_pages = math.ceil(total_comments / page_size)
-
-            comment_info["total_count"] = total_comments
-            comment_info["total_pages"] = total_pages
-
-            logger.info(f"期刊 {journal_id} 共有 {total_comments} 条评论，{total_pages} 页")
-
             # 评论API URL
             api_url = f"{config.BASE_URL}/journalappAjax_comments_center.php"
 
             page = 1
-            max_pages = total_pages
+            max_pages = None
 
             # Cookie 由调用方传入，始终用 httpx（同一代理贯穿所有评论页）
 
-            while page <= max_pages:
+            while max_pages is None or page <= max_pages:
                 # 构建请求参数
                 params = {
                     "action": "getdetailscommentslistflow",
@@ -629,10 +891,10 @@ class DetailCrawler(BaseCrawler):
 
                     if not response_text:
                         logger.warning("获取评论响应为空")
-                        if page == 1 and max_pages > 1 and not cookie_refresh_attempted:
+                        if page == 1 and not cookie_refresh_attempted:
                             logger.warning("[Cookie] 第1页响应为空，Cookie可能失效，尝试刷新")
                             await self.report_cookie_result(success=False)
-                            new_cookie = await self._get_cookie_from_pool()
+                            new_cookie = await self.get_cookie_for_http(force_login=True)
                             cookie_refresh_attempted = True
                             if new_cookie:
                                 logger.info("[Cookie] 已获取新Cookie，重新开始获取评论")
@@ -648,10 +910,10 @@ class DetailCrawler(BaseCrawler):
                     # 检查响应状态
                     if data.get("code") != 0:
                         logger.warning(f"API返回错误: {data.get('msg', 'Unknown error')}")
-                        if page == 1 and max_pages > 1 and not cookie_refresh_attempted:
+                        if page == 1 and not cookie_refresh_attempted:
                             logger.warning("[Cookie] 第1页API返回错误，Cookie可能失效，尝试刷新")
                             await self.report_cookie_result(success=False)
-                            new_cookie = await self._get_cookie_from_pool()
+                            new_cookie = await self.get_cookie_for_http(force_login=True)
                             cookie_refresh_attempted = True
                             if new_cookie:
                                 logger.info("[Cookie] 已获取新Cookie，重新开始获取评论")
@@ -660,16 +922,31 @@ class DetailCrawler(BaseCrawler):
                                 page = 1
                                 continue
                         break
+
+                    api_total_count = int(data.get("count") or 0)
+                    api_total_pages = int(data.get("pages") or 0)
+                    if page == 1:
+                        if api_total_pages <= 0 and api_total_count > 0:
+                            api_total_pages = math.ceil(api_total_count / page_size)
+                        max_pages = max(api_total_pages, 1)
+                        comment_info["total_count"] = api_total_count
+                        comment_info["total_pages"] = max_pages
+                        logger.info(f"期刊 {journal_id} API显示 {api_total_count} 条评论，{max_pages} 页")
 
                     # 提取评论数据
                     comment_data = data.get("data", [])
+                    first_content = ""
+                    if comment_data and isinstance(comment_data[0], dict):
+                        first_content = comment_data[0].get("content") or ""
+                    not_login = data.get("current_keke_app_status") == "NotLogin"
+                    has_overlay = "force_download_install" in first_content
 
                     if not comment_data:
                         logger.info(f"第 {page} 页无评论数据，停止获取")
-                        if page == 1 and max_pages > 1 and not cookie_refresh_attempted:
+                        if page == 1 and api_total_count > 0 and not cookie_refresh_attempted:
                             logger.warning("[Cookie] 第1页无评论数据，Cookie可能失效，尝试刷新")
                             await self.report_cookie_result(success=False)
-                            new_cookie = await self._get_cookie_from_pool()
+                            new_cookie = await self.get_cookie_for_http(force_login=True)
                             cookie_refresh_attempted = True
                             if new_cookie:
                                 logger.info("[Cookie] 已获取新Cookie，重新开始获取评论")
@@ -678,6 +955,26 @@ class DetailCrawler(BaseCrawler):
                                 page = 1
                                 continue
                         break
+
+                    if (not_login or has_overlay) and not cookie_refresh_attempted:
+                        logger.warning(
+                            "[Cookie] API显示未登录或返回遮罩数据，尝试刷新 Cookie "
+                            f"(status={data.get('current_keke_app_status')}, overlay={has_overlay})"
+                        )
+                        await self.report_cookie_result(success=False)
+                        new_cookie = await self.get_cookie_for_http(force_login=True)
+                        cookie_refresh_attempted = True
+                        if new_cookie:
+                            cookie_value = new_cookie
+                            comments.clear()
+                            page = 1
+                            max_pages = None
+                            comment_info = {
+                                "total_count": 0,
+                                "total_pages": 0,
+                                "crawled_count": 0
+                            }
+                            continue
 
                     # 解析每条评论
                     page_comments = []
@@ -693,28 +990,28 @@ class DetailCrawler(BaseCrawler):
 
                     logger.info(f"第 {page} 页: API返回 {len(comment_data)} 条, 有效 {len(page_comments)} 条")
 
-                    # 检测Cookie失效：多页但每页只有1条数据
-                    if len(page_comments) == 1 and max_pages > 1 and page == 1 and not cookie_refresh_attempted:
+                    # 兼容旧失效特征：多页但第1页只有1条有效数据
+                    if len(page_comments) == 1 and (max_pages or 1) > 1 and page == 1 and not cookie_refresh_attempted:
                         logger.warning(f"[Cookie] 检测到异常：多页({max_pages}页)但第1页只有1条数据，Cookie可能失效")
 
                         # 报告当前Cookie失败
                         await self.report_cookie_result(success=False)
 
                         # 尝试获取新Cookie
-                        new_cookie = await self._get_cookie_from_pool()
+                        new_cookie = await self.get_cookie_for_http(force_login=True)
                         if new_cookie:
                             logger.info("[Cookie] 已获取新Cookie，重新开始获取评论")
                             cookie_value = new_cookie
                             cookie_refresh_attempted = True
                             comments.clear()
                             page = 1
+                            max_pages = None
                             continue
                         else:
                             logger.warning("[Cookie] 无法获取新Cookie，继续使用当前Cookie")
                             cookie_refresh_attempted = True
 
                     # 检查是否还有更多评论
-                    api_total_count = data.get("count", 0)
                     if len(comments) >= api_total_count:
                         logger.info(f"已获取全部 {api_total_count} 条评论")
                         break
@@ -723,18 +1020,27 @@ class DetailCrawler(BaseCrawler):
 
                 except json.JSONDecodeError as e:
                     logger.error(f"解析JSON失败: {e}")
-                    logger.info("API获取失败，尝试从页面提取评论")
-                    fallback_comments = await self._extract_comments()
-                    comment_info["crawled_count"] = len(fallback_comments)
-                    return fallback_comments, comment_info
+                    if page == 1 and not cookie_refresh_attempted:
+                        await self.report_cookie_result(success=False)
+                        new_cookie = await self.get_cookie_for_http(force_login=True)
+                        cookie_refresh_attempted = True
+                        if new_cookie:
+                            cookie_value = new_cookie
+                            comments.clear()
+                            page = 1
+                            max_pages = None
+                            continue
+                    break
 
             comment_info["crawled_count"] = len(comments)
             
             # 验证爬取数量：至少要大于 (页数-1) * 10
             # 例如：3页至少要有 20+ 条评论（最后一页可能不满10条）
+            total_comments = comment_info.get("total_count", 0)
+            total_pages = comment_info.get("total_pages", 0)
             min_expected = (total_pages - 1) * page_size if total_pages > 1 else 0
             if len(comments) < min_expected and total_pages > 1:
-                msg = (f"页面显示 {total_comments} 条/{total_pages} 页, "
+                msg = (f"API显示 {total_comments} 条/{total_pages} 页, "
                        f"实际爬取 {len(comments)} 条 (期望至少 {min_expected} 条)")
                 logger.warning(f"[评论] 期刊 {journal_id} 评论数量异常: {msg}")
                 # 记录问题
@@ -746,8 +1052,10 @@ class DetailCrawler(BaseCrawler):
                     expected=total_comments,
                     actual=len(comments)
                 )
+            else:
+                await self.report_cookie_result(success=True)
 
-            logger.info(f"通过API共获取 {len(comments)} 条评论 (页面显示: {total_comments} 条)")
+            logger.info(f"通过API共获取 {len(comments)} 条评论 (API显示: {total_comments} 条)")
 
         except Exception as e:
             logger.error(f"API获取评论失败: {e}")
@@ -763,11 +1071,7 @@ class DetailCrawler(BaseCrawler):
         return comments, comment_info
 
     async def _fetch_with_httpx(self, api_url: str, params: Dict, cookie_value: str) -> Optional[str]:
-        """使用httpx发起POST请求（带自定义Cookie），复用当前代理（不切换）。
-
-        评论爬取要求同一 journal_id 所有页走同一代理，故此处不做代理切换。
-        代理失败直接返回 None，由上层决策。
-        """
+        """使用持久 httpx client 发起POST请求（带自定义Cookie）。"""
         proxy_info = self.get_proxy_display()
 
         # 构建Cookie字符串
@@ -783,19 +1087,18 @@ class DetailCrawler(BaseCrawler):
             "Origin": "https://www.letpub.com.cn",
             "Referer": f"{config.BASE_URL}/index.php?journalid={params.get('journalid')}&page=journalapp&view=detail",
             "User-Agent": config.USER_AGENTS[0],
-            "Content-Length": "0"
         }
 
-        url_with_params = f"{api_url}?action={params['action']}&journalid={params['journalid']}&sorttype={params['sorttype']}&page={params['page']}"
-
-        # 构建代理URL（复用当前代理，不重新获取）
-        proxy_url = self.get_httpx_proxy_url()
-
         try:
-            async with httpx.AsyncClient(timeout=30.0, proxy=proxy_url) as client:
-                response = await client.post(url_with_params, headers=headers, content="")
-                logger.debug(f"[API请求] {url_with_params} [代理: {proxy_info}] -> {response.status_code}")
-                return response.text
+            response = await self.request_http(
+                "POST",
+                api_url,
+                params=params,
+                headers=headers,
+                content="",
+            )
+            logger.debug(f"[API请求] {response.url} [代理: {proxy_info}] -> {response.status_code}")
+            return response.text
 
         except Exception as e:
             logger.error(f"[API请求] httpx请求失败 [代理: {proxy_info}]: {e}")

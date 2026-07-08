@@ -56,6 +56,26 @@ def test_host_proxy_host_reads_yaml_and_env(tmp_path, monkeypatch):
     assert cfg.HOST_PROXY_HOST == "172.17.0.1"
 
 
+def test_crawler_fetch_mode_defaults_and_validates(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.config.CONFIG_DIR", tmp_path)
+    write_yaml(tmp_path / "app.yaml", {})
+    write_yaml(tmp_path / "proxy.yaml", {})
+
+    cfg = Config()
+    assert cfg.CRAWLER_FETCH_MODE == "http"
+
+    write_yaml(tmp_path / "app.yaml", {"crawler": {"fetch_mode": "browser"}})
+    cfg = Config()
+    assert cfg.CRAWLER_FETCH_MODE == "browser"
+
+    write_yaml(tmp_path / "app.yaml", {"crawler": {"fetch_mode": "invalid"}})
+    cfg = Config()
+    assert cfg.CRAWLER_FETCH_MODE == "http"
+
+    monkeypatch.setenv("CRAWLER_FETCH_MODE", "browser")
+    assert cfg.CRAWLER_FETCH_MODE == "browser"
+
+
 def test_env_overrides_yaml(tmp_path, monkeypatch):
     monkeypatch.setattr("app.config.CONFIG_DIR", tmp_path)
     monkeypatch.setenv("RUN_MODE", "master")
