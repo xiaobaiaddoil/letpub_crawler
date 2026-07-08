@@ -1134,7 +1134,10 @@ class DetailCrawler(BaseCrawler):
             return response.text
 
         except Exception as e:
-            logger.error(f"[API请求] httpx请求失败 [代理: {proxy_info}]: {e}")
+            logger.error(
+                f"[API请求] httpx请求失败 [代理: {proxy_info}]: "
+                f"{self._format_exception(e)}"
+            )
             return None
 
     def _parse_comment_from_api(self, journal_id:str,item: Dict) -> Optional[Dict]:

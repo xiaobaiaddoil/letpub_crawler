@@ -164,35 +164,59 @@ class BaseCrawler(ABC):
                 await asyncio.sleep(wait_time)
             _LAST_LETPUB_PAGE_REQUEST_AT = loop.time()
 
+    @staticmethod
+    def _format_exception(exc: Exception) -> str:
+        detail = str(exc).strip()
+        if detail:
+            return f"{type(exc).__name__}: {detail}"
+        return type(exc).__name__
+
     async def request_http(self, method: str, url: str, throttle: bool = True, **kwargs) -> httpx.Response:
-        """发起 HTTP 请求；代理失败时自动切换直连重试一次。"""
-        await self.ensure_http_client()
-        proxy_info = self.get_proxy_display()
+        """发起 HTTP 请求；代理失败时自动切换其他代理重试。"""
         if throttle and self._should_throttle_url(url):
             await self._throttle_letpub_page_request()
-        try:
-            response = await self.http_client.request(method, url, **kwargs)
-            logger.debug(f"[HTTP] {method.upper()} {url} [代理: {proxy_info}] -> {response.status_code}")
-            return response
-        except Exception as e:
-            logger.error(f"[HTTP] 请求失败: {method.upper()} {url} [代理: {proxy_info}], 错误: {e}")
-            if self._current_proxy_info and not self._using_direct:
-                failed_proxy_id = self._current_proxy_info.get("id")
-                logger.warning(f"[HTTP代理] {proxy_info} 失败，切换其他代理重试...")
-                await self.report_proxy_result(success=False)
-                if failed_proxy_id:
-                    self._proxy_exclude_ids.add(int(failed_proxy_id))
-                await self.close_http()
-                self._current_proxy_info = None
-                await self.init_http(use_proxy=True)
-                retry_proxy_info = self.get_proxy_display()
+
+        last_error: Exception | None = None
+        max_attempts = 4
+
+        for attempt in range(1, max_attempts + 1):
+            await self.ensure_http_client()
+            proxy_info = self.get_proxy_display()
+            try:
                 response = await self.http_client.request(method, url, **kwargs)
                 logger.debug(
-                    f"[HTTP] {method.upper()} {url} [重试代理: {retry_proxy_info}] "
-                    f"-> {response.status_code}"
+                    f"[HTTP] {method.upper()} {url} [代理: {proxy_info}] -> {response.status_code}"
                 )
                 return response
-            raise
+            except Exception as exc:
+                last_error = exc
+                error_text = self._format_exception(exc)
+                if self._current_proxy_info and not self._using_direct and attempt < max_attempts:
+                    failed_proxy_id = self._current_proxy_info.get("id")
+                    logger.warning(
+                        f"[HTTP代理] 请求失败，准备切换代理重试 "
+                        f"({attempt}/{max_attempts}) {method.upper()} {url} "
+                        f"[代理: {proxy_info}] 错误: {error_text}"
+                    )
+                    await self.report_proxy_result(success=False)
+                    if failed_proxy_id:
+                        self._proxy_exclude_ids.add(int(failed_proxy_id))
+                    await self.close_http()
+                    self._current_proxy_info = None
+                    await self.init_http(use_proxy=True)
+                    if self._using_direct:
+                        logger.warning("[HTTP代理] 代理池无可用代理，后续请求将使用直连")
+                    continue
+
+                logger.error(
+                    f"[HTTP] 请求失败: {method.upper()} {url} [代理: {proxy_info}], "
+                    f"尝试={attempt}/{max_attempts}, 错误: {error_text}"
+                )
+                raise
+
+        if last_error:
+            raise last_error
+        raise RuntimeError(f"HTTP 请求失败: {method.upper()} {url}")
 
     def _cookie_value_from_client(self) -> Optional[str]:
         """从当前 HTTP 客户端提取 Cookie 字符串。"""
