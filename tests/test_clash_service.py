@@ -48,6 +48,18 @@ def test_extract_proxy_names_dedupe(service, tmp_path):
     assert service.extract_proxy_names(p) == ["A", "B"]
 
 
+def test_extract_proxy_names_dedupe_same_endpoint(service, tmp_path):
+    p = tmp_path / "dup_endpoint.yaml"
+    p.write_text(
+        "proxies:\n"
+        "  - {name: A, type: trojan, server: a.example.com, port: '443', password: x}\n"
+        "  - {name: B, type: trojan, server: A.EXAMPLE.COM, port: 443, password: y}\n"
+        "  - {name: C, type: trojan, server: a.example.com, port: 8443, password: x}\n",
+        encoding="utf-8",
+    )
+    assert service.extract_proxy_names(p) == ["A", "C"]
+
+
 def test_get_current_profile_path_resolves_uid(service, tmp_clash_dir):
     (tmp_clash_dir / "profiles.yaml").write_text(
         "current: AAA\n"

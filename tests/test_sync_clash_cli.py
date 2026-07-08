@@ -5,8 +5,10 @@ from unittest.mock import AsyncMock, patch
 
 from tools.sync_clash import (
     current_profile_signature,
+    parse_ip_response,
     run_sync,
     runtime_has_crawler_listener,
+    select_unique_proxy_names_by_egress_ip,
     sync_reason,
 )
 
@@ -124,9 +126,11 @@ async def test_run_sync_full_flow(tmp_clash_dir, in_memory_db, monkeypatch):
             secret="x",
             listener_port=30000,
             group_name="crawler-pool",
+            dedupe_egress_ip=False,
         )
 
     assert result["nodes"] == 3
+    assert result["raw_nodes"] == 3
     assert result["runtime_path"].endswith("clash-verge.yaml")
     assert result["reload_ok"] is True
     assert result["proxy_id"]
@@ -177,6 +181,7 @@ async def test_run_sync_reload_failure_still_writes_runtime(
             profile_dir=str(tmp_clash_dir),
             controller="http://127.0.0.1:9097",
             secret="x",
+            dedupe_egress_ip=False,
         )
 
     assert result["reload_ok"] is False
@@ -187,3 +192,36 @@ async def test_run_sync_reload_failure_still_writes_runtime(
         ProxyPool.source == "clash",
         ProxyPool.is_active == True,
     ).count() == 3
+
+
+def test_parse_ip_response():
+    assert parse_ip_response('{"ip":"1.2.3.4"}') == "1.2.3.4"
+    assert parse_ip_response("2001:db8::1\n") == "2001:db8::1"
+    assert parse_ip_response("no ip here") is None
+
+
+@pytest.mark.asyncio
+async def test_select_unique_proxy_names_by_egress_ip(monkeypatch):
+    calls = []
+    responses = {
+        30000: ("1.1.1.1", None),
+        30001: ("1.1.1.1", None),
+        30002: ("2.2.2.2", None),
+        30003: (None, "timeout"),
+    }
+
+    async def fake_probe(port):
+        calls.append(port)
+        return responses[port]
+
+    monkeypatch.setattr("tools.sync_clash.probe_listener_egress_ip", fake_probe)
+
+    names, ips = await select_unique_proxy_names_by_egress_ip(
+        ["A", "B", "C", "D"],
+        listener_port=30000,
+        concurrency=2,
+    )
+
+    assert calls == [30000, 30001, 30002, 30003]
+    assert names == ["A", "C"]
+    assert ips == ["1.1.1.1", "2.2.2.2"]

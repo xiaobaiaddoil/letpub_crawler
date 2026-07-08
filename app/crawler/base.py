@@ -177,13 +177,20 @@ class BaseCrawler(ABC):
         except Exception as e:
             logger.error(f"[HTTP] 请求失败: {method.upper()} {url} [代理: {proxy_info}], 错误: {e}")
             if self._current_proxy_info and not self._using_direct:
-                logger.warning(f"[HTTP代理] {proxy_info} 失败，切换直连重试...")
+                failed_proxy_id = self._current_proxy_info.get("id")
+                logger.warning(f"[HTTP代理] {proxy_info} 失败，切换其他代理重试...")
                 await self.report_proxy_result(success=False)
+                if failed_proxy_id:
+                    self._proxy_exclude_ids.add(int(failed_proxy_id))
                 await self.close_http()
                 self._current_proxy_info = None
-                await self.init_http(use_proxy=False)
+                await self.init_http(use_proxy=True)
+                retry_proxy_info = self.get_proxy_display()
                 response = await self.http_client.request(method, url, **kwargs)
-                logger.debug(f"[HTTP] {method.upper()} {url} [直连重试] -> {response.status_code}")
+                logger.debug(
+                    f"[HTTP] {method.upper()} {url} [重试代理: {retry_proxy_info}] "
+                    f"-> {response.status_code}"
+                )
                 return response
             raise
 
@@ -705,6 +712,25 @@ class BaseCrawler(ABC):
         if self._current_proxy_info:
             return proxy_display(self._current_proxy_info)
         return "直连"
+
+    def get_proxy_context_for_log(self) -> str:
+        """获取当前代理诊断信息，避免在限流日志里丢失上下文。"""
+        if not self._current_proxy_info or self._using_direct:
+            return "use_proxy=false proxy=直连"
+
+        proxy_info = self._current_proxy_info
+        parts = [
+            "use_proxy=true",
+            f"proxy={proxy_display(proxy_info)}",
+        ]
+        for key in ("id", "source", "proxy_type", "area"):
+            value = proxy_info.get(key)
+            if value:
+                parts.append(f"{key}={value}")
+        remark = str(proxy_info.get("remark") or "").strip()
+        if remark:
+            parts.append(f"remark={remark[:120]}")
+        return " ".join(parts)
 
     def get_httpx_proxy_url(self) -> Optional[str]:
         """获取 httpx 使用的当前代理 URL。"""

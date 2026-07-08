@@ -9,18 +9,36 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ipaddress
+import json
 import logging
 import socket
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import httpx
 import yaml
 from app.config import config
 from app.database import SessionLocal
 from app.services.clash_service import ClashService
 
 logger = logging.getLogger(__name__)
+
+EGRESS_IP_CHECK_URLS = (
+    "https://api.ipify.org?format=json",
+    "https://api.ipify.org",
+)
+
+
+@dataclass(frozen=True)
+class EgressProbeResult:
+    index: int
+    name: str
+    port: int
+    ip: str | None
+    error: str | None = None
 
 
 def _get_db_session():
@@ -34,6 +52,135 @@ def listener_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
             return True
     except OSError:
         return False
+
+
+def parse_ip_response(text: str) -> str | None:
+    """Extract and validate one IP address from common IP check responses."""
+    candidates = []
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = None
+
+    if isinstance(data, dict):
+        candidates.extend(
+            value for key in ("ip", "origin") if (value := data.get(key))
+        )
+    candidates.append(text)
+
+    for candidate in candidates:
+        for part in str(candidate).replace(",", " ").split():
+            token = part.strip().strip("[]")
+            try:
+                return str(ipaddress.ip_address(token))
+            except ValueError:
+                continue
+    return None
+
+
+async def probe_listener_egress_ip(
+    port: int,
+    check_urls: tuple[str, ...] = EGRESS_IP_CHECK_URLS,
+    timeout: float = 12.0,
+) -> tuple[str | None, str | None]:
+    """Request an external IP service through one local Clash listener."""
+    proxy = f"http://127.0.0.1:{port}"
+    last_error: str | None = None
+    try:
+        async with httpx.AsyncClient(
+            proxy=proxy,
+            timeout=timeout,
+            follow_redirects=True,
+        ) as client:
+            for url in check_urls:
+                try:
+                    resp = await client.get(url)
+                    if not 200 <= resp.status_code < 300:
+                        last_error = f"{url} HTTP {resp.status_code}"
+                        continue
+                    ip = parse_ip_response(resp.text)
+                    if ip:
+                        return ip, None
+                    last_error = f"{url} 未返回可识别 IP"
+                except httpx.HTTPError as exc:
+                    last_error = f"{type(exc).__name__}: {exc}"
+    except httpx.HTTPError as exc:
+        last_error = f"{type(exc).__name__}: {exc}"
+    return None, last_error
+
+
+async def select_unique_proxy_names_by_egress_ip(
+    proxy_names: list[str],
+    listener_port: int,
+    concurrency: int = 8,
+) -> tuple[list[str], list[str | None]]:
+    """Keep the first listener for each observed egress IP."""
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+
+    async def probe(index: int, name: str) -> EgressProbeResult:
+        port = listener_port + index
+        async with semaphore:
+            ip, error = await probe_listener_egress_ip(port)
+        return EgressProbeResult(
+            index=index,
+            name=name,
+            port=port,
+            ip=ip,
+            error=error,
+        )
+
+    results = await asyncio.gather(
+        *(probe(index, name) for index, name in enumerate(proxy_names))
+    )
+    results = sorted(results, key=lambda item: item.index)
+
+    seen_ips: dict[str, EgressProbeResult] = {}
+    selected_names: list[str] = []
+    selected_ips: list[str | None] = []
+    duplicate_count = 0
+    failed_count = 0
+
+    for result in results:
+        if not result.ip:
+            failed_count += 1
+            logger.warning(
+                "Clash listener 探测失败: port=%s node=%s error=%s",
+                result.port,
+                result.name,
+                result.error or "unknown",
+            )
+            continue
+
+        if result.ip in seen_ips:
+            duplicate_count += 1
+            first = seen_ips[result.ip]
+            logger.info(
+                "Clash 出口 IP 重复: ip=%s, 保留 port=%s node=%s, 跳过 port=%s node=%s",
+                result.ip,
+                first.port,
+                first.name,
+                result.port,
+                result.name,
+            )
+            continue
+
+        seen_ips[result.ip] = result
+        selected_names.append(result.name)
+        selected_ips.append(result.ip)
+
+    logger.info(
+        "Clash 出口 IP 去重: 原始=%s, 唯一出口=%s, 重复IP=%s, 探测失败=%s",
+        len(proxy_names),
+        len(selected_names),
+        duplicate_count,
+        failed_count,
+    )
+
+    if not selected_names:
+        logger.warning("所有 listener 出口 IP 探测失败，保留静态去重节点")
+        return proxy_names, [None] * len(proxy_names)
+
+    return selected_names, selected_ips
 
 
 def runtime_has_crawler_listener(
@@ -112,6 +259,8 @@ async def run_sync(
     secret: str,
     listener_port: int = 60000,
     group_name: str = "crawler-pool",
+    dedupe_egress_ip: bool = True,
+    egress_probe_concurrency: int = 8,
 ) -> dict:
     """同步主流程，返回结果摘要。"""
     svc = ClashService(
@@ -141,18 +290,45 @@ async def run_sync(
             "mihomo 自动重载失败。请在 Verge UI 手动点选当前 profile 触发重载。"
         )
 
+    selected_names = names
+    selected_egress_ips: list[str | None] = []
+    if dedupe_egress_ip and reload_ok:
+        selected_names, selected_egress_ips = await select_unique_proxy_names_by_egress_ip(
+            names,
+            listener_port=listener_port,
+            concurrency=egress_probe_concurrency,
+        )
+        if selected_names != names:
+            runtime_path = svc.inject_runtime_config(
+                proxy_names=selected_names,
+                listener_port=listener_port,
+                group_name=group_name,
+            )
+            logger.info(f"已按唯一出口 IP 收敛运行时配置: {runtime_path}")
+            reload_ok = await svc.reload_via_api(config_path=runtime_path)
+            if not reload_ok:
+                logger.warning(
+                    "mihomo 二次重载失败。请在 Verge UI 手动点选当前 profile 触发重载。"
+                )
+    elif dedupe_egress_ip:
+        logger.warning("mihomo 未完成自动重载，跳过出口 IP 去重")
+
     db = _get_db_session()
     try:
         proxy_id = svc.sync_proxy_pool(
             db=db,
-            node_count=len(names),
+            node_count=len(selected_names),
             listener_port=listener_port,
+            proxy_names=selected_names,
+            egress_ips=selected_egress_ips,
         )
     finally:
         db.close()
 
     return {
-        "nodes": len(names),
+        "raw_nodes": len(names),
+        "nodes": len(selected_names),
+        "egress_ips": selected_egress_ips,
         "runtime_path": str(runtime_path),
         "reload_ok": reload_ok,
         "proxy_id": proxy_id,
@@ -167,6 +343,8 @@ async def watch_sync(
     group_name: str = "crawler-pool",
     interval: float = 10.0,
     sync_on_start: bool = True,
+    dedupe_egress_ip: bool = True,
+    egress_probe_concurrency: int = 8,
 ) -> None:
     """Long-running guard: resync after Verge rewrites config or port vanishes."""
     previous_signature: tuple[tuple[str, int, int], ...] | None = None
@@ -180,6 +358,8 @@ async def watch_sync(
                 secret=secret,
                 listener_port=listener_port,
                 group_name=group_name,
+                dedupe_egress_ip=dedupe_egress_ip,
+                egress_probe_concurrency=egress_probe_concurrency,
             )
             previous_signature = current_profile_signature(profile_dir)
         except Exception:
@@ -201,6 +381,8 @@ async def watch_sync(
                     secret=secret,
                     listener_port=listener_port,
                     group_name=group_name,
+                    dedupe_egress_ip=dedupe_egress_ip,
+                    egress_probe_concurrency=egress_probe_concurrency,
                 )
                 previous_signature = current_profile_signature(profile_dir)
             except Exception:
@@ -222,6 +404,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--watch", action="store_true", help="长期运行，检测配置更新或 listener 失效后自动重同步")
     parser.add_argument("--interval", type=float, default=10.0, help="watch 模式检测间隔秒数")
     parser.add_argument("--no-sync-on-start", action="store_true", help="watch 启动时不立即同步")
+    parser.add_argument("--no-egress-dedupe", action="store_true", help="不探测实际出口 IP，仅按 profile 静态节点同步")
+    parser.add_argument("--egress-probe-concurrency", type=int, default=8, help="出口 IP 探测并发数")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -256,6 +440,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 group_name=group_name,
                 interval=args.interval,
                 sync_on_start=not args.no_sync_on_start,
+                dedupe_egress_ip=not args.no_egress_dedupe,
+                egress_probe_concurrency=args.egress_probe_concurrency,
             ))
             return 0
 
@@ -265,6 +451,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             secret=secret,
             listener_port=listener_port,
             group_name=group_name,
+            dedupe_egress_ip=not args.no_egress_dedupe,
+            egress_probe_concurrency=args.egress_probe_concurrency,
         ))
     except FileNotFoundError as e:
         print(f"错误: {e}", file=sys.stderr)
@@ -277,7 +465,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     print(
-        f"同步完成: {result['nodes']} 节点。"
+        f"同步完成: {result['raw_nodes']} 原始节点，{result['nodes']} 唯一出口节点。"
         f"listener=127.0.0.1:{listener_port}。"
         f"reload={'成功' if result['reload_ok'] else '失败（需手动重载）'}。"
         f"ProxyPool id={result['proxy_id']}"

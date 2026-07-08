@@ -1,5 +1,6 @@
 """代理服务 - 管理代理池（支持隧道代理和私密代理）"""
 import logging
+import random
 import re
 import time
 import httpx
@@ -117,6 +118,8 @@ class ProxyService:
     
     # 失败阈值
     MAX_FAIL_COUNT = 3
+    BASE_WEIGHT = 10.0
+    MAX_SUCCESS_BONUS = 50
     
     def __init__(self, db: Session):
         self.db = db
@@ -139,8 +142,24 @@ class ProxyService:
         
         return proxy
     
+    def _proxy_weight(self, proxy: ProxyPool) -> float:
+        """动态代理权重：成功次数提高权重，失败次数降低权重。"""
+        success_count = max(0, int(proxy.success_count or 0))
+        fail_count = max(0, int(proxy.fail_count or 0))
+        total_fail_count = max(0, int(proxy.total_fail_count or 0))
+
+        positive = self.BASE_WEIGHT + min(success_count, self.MAX_SUCCESS_BONUS)
+        penalty = 1 + (fail_count * 3) + min(total_fail_count, 50) * 0.2
+        return max(0.1, positive / penalty)
+
+    def _choose_weighted_proxy(self, proxies: list[ProxyPool]) -> Optional[ProxyPool]:
+        if not proxies:
+            return None
+        weights = [self._proxy_weight(proxy) for proxy in proxies]
+        return random.choices(proxies, weights=weights, k=1)[0]
+
     async def get_random_proxy(self, exclude_ids: Optional[list[int]] = None) -> Optional[ProxyPool]:
-        """随机获取一个可用代理"""
+        """按动态权重获取一个可用代理。"""
         exclude_ids = exclude_ids or []
         # 先统计各状态的代理数量
         total = self.db.query(ProxyPool).count()
@@ -166,46 +185,56 @@ class ProxyService:
         if exclude_ids:
             query = query.filter(~ProxyPool.id.in_(exclude_ids))
 
-        proxy = query.order_by(func.random()).first()
+        candidates = query.order_by(ProxyPool.id.asc()).all()
+        proxy = self._choose_weighted_proxy(candidates)
         if proxy is None and exclude_ids:
             logger.warning("[代理池] 排除已分配代理后无可用代理，回退到全量随机")
-            proxy = self.db.query(ProxyPool).filter(
+            candidates = self.db.query(ProxyPool).filter(
                 ProxyPool.is_active == True,
                 ProxyPool.is_valid == True,
                 ProxyPool.fail_count < self.MAX_FAIL_COUNT
-            ).order_by(func.random()).first()
+            ).order_by(ProxyPool.id.asc()).all()
+            proxy = self._choose_weighted_proxy(candidates)
 
         if proxy:
             proxy.last_used_at = datetime.now(timezone.utc)
             self.db.commit()
-        
+            logger.debug(
+                "[代理池] 加权选择: id=%s %s:%s weight=%.2f success=%s fail=%s total_fail=%s",
+                proxy.id,
+                proxy.ip,
+                proxy.port,
+                self._proxy_weight(proxy),
+                proxy.success_count,
+                proxy.fail_count,
+                proxy.total_fail_count,
+            )
+
         return proxy
     
     def report_proxy_result(self, proxy_id: int, success: bool):
-        """报告代理使用结果。
-
-        source='clash' 的条目代表 mihomo load-balance 入口，
-        节点健康检查由 mihomo 内核负责，应用层不打分、不下架。
-        """
+        """报告代理使用结果，用于动态调整后续分配权重。"""
         proxy = self.db.query(ProxyPool).filter(ProxyPool.id == proxy_id).first()
         if not proxy:
             return
 
-        if proxy.source == "clash":
-            if success:
-                proxy.success_count += 1
-            self.db.commit()
-            return
-
         if success:
             proxy.success_count += 1
-            proxy.fail_count = 0
+            proxy.fail_count = max(0, (proxy.fail_count or 0) - 1)
+            proxy.is_valid = True
         else:
-            proxy.fail_count += 1
-            proxy.total_fail_count += 1
-            # 失败一次即标记为无效
-            proxy.is_valid = False
-            logger.warning(f"[代理] {proxy.ip}:{proxy.port} 请求失败，已标记无效")
+            proxy.fail_count = (proxy.fail_count or 0) + 1
+            proxy.total_fail_count = (proxy.total_fail_count or 0) + 1
+            if proxy.fail_count >= self.MAX_FAIL_COUNT:
+                proxy.is_valid = False
+                logger.warning(
+                    f"[代理] {proxy.ip}:{proxy.port} 连续失败 {proxy.fail_count} 次，已标记无效"
+                )
+            else:
+                logger.warning(
+                    f"[代理] {proxy.ip}:{proxy.port} 请求失败，降低权重 "
+                    f"(fail={proxy.fail_count}/{self.MAX_FAIL_COUNT})"
+                )
 
         self.db.commit()
 

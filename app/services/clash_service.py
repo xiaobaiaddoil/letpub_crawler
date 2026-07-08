@@ -4,9 +4,10 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Hashable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, TYPE_CHECKING
+from typing import Any, List, Optional, TYPE_CHECKING
 
 import httpx
 import yaml
@@ -33,7 +34,7 @@ class ClashService:
         self.secret = secret
 
     def extract_proxy_names(self, profile_path: Path) -> List[str]:
-        """从 profile yaml 抽取 proxies[*].name，去重保序。"""
+        """从 profile yaml 抽取唯一节点名，按真实出口端点和名称双重去重。"""
         with open(profile_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
 
@@ -43,17 +44,87 @@ class ClashService:
             )
 
         proxies = data["proxies"] or []
-        seen = set()
+        seen_names = set()
+        seen_nodes = set()
         names: List[str] = []
+        named_count = 0
+        skipped_name_duplicates = 0
+        skipped_node_duplicates = 0
         for item in proxies:
             if not isinstance(item, dict):
                 continue
             name = item.get("name")
-            if not name or name in seen:
+            if not name:
                 continue
-            seen.add(name)
+            named_count += 1
+            name = str(name)
+            if name in seen_names:
+                skipped_name_duplicates += 1
+                continue
+
+            node_key = self._proxy_dedupe_key(item)
+            if node_key in seen_nodes:
+                skipped_node_duplicates += 1
+                continue
+
+            seen_names.add(name)
+            seen_nodes.add(node_key)
             names.append(name)
+
+        skipped = skipped_name_duplicates + skipped_node_duplicates
+        if skipped:
+            logger.info(
+                "Clash 节点去重: 原始=%s, 唯一=%s, 同名重复=%s, 同端点重复=%s",
+                named_count,
+                len(names),
+                skipped_name_duplicates,
+                skipped_node_duplicates,
+            )
         return names
+
+    def _proxy_dedupe_key(self, proxy: dict[str, Any]) -> tuple[Any, ...]:
+        """Return a stable key for one real Clash node.
+
+        Most subscription duplicates differ only by name. For crawler load
+        distribution the important dimension is the likely egress endpoint, so
+        nodes sharing type/server/port are treated as one candidate.
+        """
+        proxy_type = proxy.get("type")
+        server = proxy.get("server")
+        port = proxy.get("port")
+        if proxy_type and server and port is not None:
+            return (
+                "endpoint",
+                str(proxy_type).strip().lower(),
+                str(server).strip().lower(),
+                self._normalize_port(port),
+            )
+
+        config = {
+            key: value
+            for key, value in proxy.items()
+            if key != "name"
+        }
+        return ("config", self._freeze_config(config))
+
+    def _normalize_port(self, value: Any) -> int | str:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return str(value).strip()
+
+    def _freeze_config(self, value: Any) -> Hashable:
+        if isinstance(value, dict):
+            return tuple(
+                sorted((str(k), self._freeze_config(v)) for k, v in value.items())
+            )
+        if isinstance(value, list):
+            return tuple(self._freeze_config(item) for item in value)
+        if isinstance(value, set):
+            return tuple(sorted(self._freeze_config(item) for item in value))
+        if isinstance(value, Hashable):
+            return value
+        return repr(value)
 
     def get_current_profile_path(self) -> Path:
         """读 profiles.yaml 取当前 current uid，返回对应 profile 文件绝对路径。"""
@@ -285,7 +356,9 @@ class ClashService:
             client_factory = _build_async_client
             url = f"{self.controller}/configs?force=true"
 
-        headers = {"Authorization": f"Bearer {self.secret}"}
+        headers = {}
+        if self.secret:
+            headers["Authorization"] = f"Bearer {self.secret}"
         body = {"path": str(config_path)}
 
         try:
@@ -315,9 +388,16 @@ class ClashService:
         db: "Session",
         node_count: int,
         listener_port: int = 60000,
+        proxy_names: Optional[List[str]] = None,
+        egress_ips: Optional[List[Optional[str]]] = None,
     ) -> int:
         """同步 ProxyPool：旧 source=clash 全下架，按节点写入多条本地 listener。返回首条 id。"""
         from app.models.proxy_pool import ProxyPool
+
+        if proxy_names is not None:
+            node_count = len(proxy_names)
+        if node_count <= 0:
+            raise ValueError("node_count 必须大于 0")
 
         db.query(ProxyPool).filter(
             ProxyPool.source == "clash",
@@ -327,6 +407,13 @@ class ClashService:
         entries = []
         now = datetime.now(timezone.utc)
         for idx in range(node_count):
+            node_name = proxy_names[idx] if proxy_names and idx < len(proxy_names) else None
+            egress_ip = egress_ips[idx] if egress_ips and idx < len(egress_ips) else None
+            remark_parts = [f"clash node listener {idx + 1}/{node_count}"]
+            if node_name:
+                remark_parts.append(f"node={node_name}")
+            if egress_ip:
+                remark_parts.append(f"egress_ip={egress_ip}")
             entries.append(
                 ProxyPool(
                     ip="127.0.0.1",
@@ -340,7 +427,7 @@ class ClashService:
                     success_count=0,
                     fail_count=0,
                     total_fail_count=0,
-                    remark=f"clash node listener {idx + 1}/{node_count}",
+                    remark="; ".join(remark_parts),
                     created_at=now,
                 )
             )

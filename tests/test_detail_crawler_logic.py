@@ -96,6 +96,30 @@ def test_validate_with_required_field_passes(crawler):
     crawler._validate_basic_info(info, 1)  # should not raise
 
 
+def test_proxy_context_for_log_includes_proxy_metadata(crawler):
+    crawler._using_direct = False
+    crawler._current_proxy_info = {
+        "id": 12,
+        "ip": "127.0.0.1",
+        "port": 60000,
+        "source": "clash",
+        "proxy_type": "direct",
+        "area": "local-clash",
+        "username": "hidden",
+        "password": "secret",
+        "remark": "node=A; egress_ip=1.2.3.4",
+    }
+
+    context = crawler.get_proxy_context_for_log()
+
+    assert "use_proxy=true" in context
+    assert "proxy=127.0.0.1:60000" in context
+    assert "id=12" in context
+    assert "source=clash" in context
+    assert "egress_ip=1.2.3.4" in context
+    assert "secret" not in context
+
+
 # ── HTTP HTML detail extraction ───────────────────────────────────────────────
 
 SAMPLE_DETAIL_HTML = """

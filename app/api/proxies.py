@@ -142,7 +142,12 @@ async def get_random_proxy(exclude_ids: str = "", db: Session = Depends(get_db))
             "protocol": proxy.protocol,
             "proxy_type": proxy.proxy_type or "direct",
             "source": proxy.source,
-            "username": proxy.username
+            "area": proxy.area,
+            "remark": proxy.remark,
+            "success_count": proxy.success_count,
+            "fail_count": proxy.fail_count,
+            "total_fail_count": proxy.total_fail_count,
+            "username": proxy.username,
         }
         # 解密密码返回给 worker
         if proxy.password:

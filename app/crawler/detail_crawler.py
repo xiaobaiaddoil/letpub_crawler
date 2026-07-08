@@ -270,6 +270,7 @@ class DetailCrawler(BaseCrawler):
         """获取详情页 HTML；遇到 LetPub 页面限流时等待后重试。"""
         last_response = None
         max_attempts = 3
+        reported_rate_limit_failure = False
         for attempt in range(1, max_attempts + 1):
             response = await self.request_http("GET", url, headers={
                 "User-Agent": config.USER_AGENTS[0],
@@ -282,8 +283,12 @@ class DetailCrawler(BaseCrawler):
             wait_seconds = max(config.CRAWL_DELAY_MAX * attempt, 10)
             logger.warning(
                 f"[限流] 期刊 {journal_id} 详情页触发请求过快提示，"
-                f"{wait_seconds}s 后重试 ({attempt}/{max_attempts})"
+                f"{wait_seconds}s 后重试 ({attempt}/{max_attempts}) "
+                f"[{self.get_proxy_context_for_log()}]"
             )
+            if not reported_rate_limit_failure:
+                await self.report_proxy_result(success=False)
+                reported_rate_limit_failure = True
             await asyncio.sleep(wait_seconds)
 
         return last_response
@@ -319,6 +324,10 @@ class DetailCrawler(BaseCrawler):
         if response.status_code != 200:
             raise Exception(f"无法访问详情页: {url}, HTTP {response.status_code}")
         if self._is_rate_limited_html(response.text):
+            logger.warning(
+                f"[限流] 期刊 {journal_id} 详情页重试后仍被限制 "
+                f"[{self.get_proxy_context_for_log()}]"
+            )
             raise Exception(f"期刊 {journal_id} 详情页被 LetPub 限流，重试后仍未恢复")
 
         detail = {

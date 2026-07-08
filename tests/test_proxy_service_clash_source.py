@@ -33,7 +33,7 @@ def _add(db, **kwargs) -> ProxyPool:
     return p
 
 
-def test_clash_success_increments_success_only(db):
+def test_proxy_success_increments_success_and_reduces_fail_count(db):
     p = _add(db, source="clash")
     ProxyService(db).report_proxy_result(p.id, success=True)
     db.refresh(p)
@@ -42,30 +42,39 @@ def test_clash_success_increments_success_only(db):
     assert p.is_valid is True
 
 
-def test_clash_failure_no_penalty(db):
+def test_proxy_failure_lowers_weight_without_immediate_disable(db):
     p = _add(db, source="clash", fail_count=0, is_valid=True)
-    ProxyService(db).report_proxy_result(p.id, success=False)
-    db.refresh(p)
-    assert p.fail_count == 0
-    assert p.is_valid is True
-    assert p.is_active is True
-
-
-def test_non_clash_failure_marks_invalid(db):
-    p = _add(db, source="manual", fail_count=0, is_valid=True)
     ProxyService(db).report_proxy_result(p.id, success=False)
     db.refresh(p)
     assert p.fail_count == 1
     assert p.total_fail_count == 1
+    assert p.is_valid is True
+    assert p.is_active is True
+
+
+def test_proxy_failure_marks_invalid_at_threshold(db):
+    p = _add(db, source="manual", fail_count=2, is_valid=True)
+    ProxyService(db).report_proxy_result(p.id, success=False)
+    db.refresh(p)
+    assert p.fail_count == 3
+    assert p.total_fail_count == 1
     assert p.is_valid is False
 
 
-def test_non_clash_success_resets_fail_count(db):
+def test_proxy_success_reduces_fail_count(db):
     p = _add(db, source="manual", fail_count=2, is_valid=True)
     ProxyService(db).report_proxy_result(p.id, success=True)
     db.refresh(p)
     assert p.success_count == 1
-    assert p.fail_count == 0
+    assert p.fail_count == 1
+
+
+def test_proxy_weight_success_and_failure(db):
+    service = ProxyService(db)
+    good = _add(db, success_count=10, fail_count=0, total_fail_count=0)
+    bad = _add(db, port=30001, success_count=0, fail_count=2, total_fail_count=10)
+
+    assert service._proxy_weight(good) > service._proxy_weight(bad)
 
 
 @pytest.mark.asyncio

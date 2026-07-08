@@ -634,6 +634,12 @@ class DistributedWorker:
                 continue
 
             task_success = await self._execute_task(task, task_type, coroutine_id, crawler)
+            proxy_info = crawler.get_current_proxy_info() if crawler else None
+            if proxy_info and proxy_info.get("id"):
+                self._consumer_proxy_ids[coroutine_id] = int(proxy_info["id"])
+            else:
+                self._consumer_proxy_ids.pop(coroutine_id, None)
+
             if not task_success or (fetch_mode == "browser" and crawler.is_using_direct()):
                 await crawler.close()
                 crawler = None
