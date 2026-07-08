@@ -1,11 +1,13 @@
-{% extends "base.html" %} {% block title %}代理池管理{% endblock %} {% block
-content %}
+{% extends "base.html" %}
+{% block title %}代理池管理{% endblock %}
+{% block content %}
 <div class="container-fluid">
   <div class="row mb-4">
-    <div class="col"><h2>代理池管理</h2></div>
+    <div class="col">
+      <h2>代理池管理</h2>
+    </div>
   </div>
 
-  <!-- 统计卡片 -->
   <div class="row mb-4">
     <div class="col-md-2">
       <div class="card bg-primary text-white">
@@ -59,491 +61,299 @@ content %}
     </div>
   </div>
 
-  <!-- 使用详情 -->
   <div class="row mb-4">
-    <div class="col-12">
-      <div class="card">
-        <div class="card-body py-2">
-          <div class="d-flex justify-content-between align-items-center">
-            <div>
-              <span class="text-muted">成功请求:</span>
-              <span class="text-success fw-bold" id="stat-success">0</span>
-              <span class="mx-3">|</span>
-              <span class="text-muted">失败请求:</span>
-              <span class="text-danger fw-bold" id="stat-fail">0</span>
-              <span class="mx-3">|</span>
-              <span class="text-muted">无效代理:</span>
-              <span class="text-warning fw-bold" id="stat-invalid">0</span>
+    <div class="col-lg-7">
+      <div class="card h-100">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span>导入代理</span>
+          <button class="btn btn-sm btn-primary" onclick="importProxies()">导入</button>
+        </div>
+        <div class="card-body">
+          <textarea
+            class="form-control"
+            id="proxy-import-text"
+            rows="10"
+            placeholder="1.2.3.4:8080&#10;1.2.3.4:8080:user:pass&#10;user:pass@proxy.example.com:8000&#10;http://user:pass@proxy.example.com:8000"
+          ></textarea>
+
+          <div class="row mt-3">
+            <div class="col-md-3 mb-3">
+              <label class="form-label">协议</label>
+              <select class="form-select" id="import-protocol">
+                <option value="http">HTTP</option>
+                <option value="https">HTTPS</option>
+                <option value="socks5">SOCKS5</option>
+              </select>
             </div>
-            <div>
-              <small class="text-muted">自动刷新: 每10秒</small>
+            <div class="col-md-3 mb-3">
+              <label class="form-label">类型</label>
+              <select class="form-select" id="import-type">
+                <option value="private">私密代理</option>
+                <option value="tunnel">隧道代理</option>
+                <option value="direct">普通代理</option>
+              </select>
+            </div>
+            <div class="col-md-3 mb-3">
+              <label class="form-label">来源</label>
+              <select class="form-select" id="import-source">
+                <option value="manual">手动导入</option>
+                <option value="kuaidaili">快代理</option>
+                <option value="other">其他</option>
+              </select>
+            </div>
+            <div class="col-md-3 mb-3">
+              <label class="form-label">备注</label>
+              <input class="form-control" id="import-remark" placeholder="代理网站/套餐" />
             </div>
           </div>
+
+          <div class="row">
+            <div class="col-md-6 mb-3">
+              <label class="form-label">默认用户名</label>
+              <input class="form-control" id="import-username" />
+            </div>
+            <div class="col-md-6 mb-3">
+              <label class="form-label">默认密码</label>
+              <input class="form-control" id="import-password" />
+            </div>
+          </div>
+
+          <div id="import-result" class="alert alert-info mb-0" style="display: none"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-lg-5">
+      <div class="card h-100">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span>导出代理</span>
+          <div class="btn-group btn-group-sm">
+            <button class="btn btn-outline-primary" onclick="previewExportText()">预览</button>
+            <button class="btn btn-outline-success" onclick="copyExportText()">复制</button>
+            <button class="btn btn-primary" onclick="downloadExportText()">下载</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="row">
+            <div class="col-md-6 mb-3">
+              <label class="form-label">格式</label>
+              <select class="form-select" id="export-format">
+                <option value="hostport_auth">host:port:user:pass</option>
+                <option value="url">protocol://user:pass@host:port</option>
+                <option value="hostport">host:port</option>
+              </select>
+            </div>
+            <div class="col-md-6 mb-3">
+              <label class="form-label">范围</label>
+              <div class="d-flex flex-wrap gap-3 mt-2">
+                <div class="form-check">
+                  <input class="form-check-input" type="checkbox" id="export-active" checked />
+                  <label class="form-check-label" for="export-active">启用</label>
+                </div>
+                <div class="form-check">
+                  <input class="form-check-input" type="checkbox" id="export-valid" />
+                  <label class="form-check-label" for="export-valid">有效</label>
+                </div>
+                <div class="form-check">
+                  <input class="form-check-input" type="checkbox" id="export-auth" checked />
+                  <label class="form-check-label" for="export-auth">认证</label>
+                </div>
+              </div>
+            </div>
+          </div>
+          <textarea
+            class="form-control"
+            id="export-preview"
+            rows="10"
+            readonly
+            placeholder="导出内容"
+          ></textarea>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- 操作按钮 -->
-  <div class="row mb-3">
-    <div class="col">
-      <button class="btn btn-primary" onclick="showAddTunnelModal()">
-        <i class="bi bi-plus"></i> 添加隧道代理
-      </button>
-      <button class="btn btn-success" onclick="showAddPrivateModal()">
-        <i class="bi bi-plus"></i> 添加私密代理
-      </button>
-      <button class="btn btn-info" onclick="checkAllProxies()">
-        <i class="bi bi-check-circle"></i> 验证全部
-      </button>
-      <button class="btn btn-warning" onclick="clearInvalid()">
-        <i class="bi bi-trash"></i> 清理无效
-      </button>
-      <button class="btn btn-secondary" onclick="showConfigModal()">
-        <i class="bi bi-gear"></i> 配置管理
-      </button>
-      <button class="btn btn-outline-success" onclick="autoRefreshProxies()">
-        <i class="bi bi-arrow-repeat"></i> 自动刷新
-      </button>
-    </div>
-  </div>
-
-  <!-- 代理列表 -->
   <div class="card">
-    <div class="card-header">
+    <div class="card-header d-flex justify-content-between align-items-center">
       <span>代理列表</span>
-      <button
-        class="btn btn-sm btn-outline-primary float-end"
-        onclick="loadProxies()"
-      >
-        <i class="bi bi-arrow-clockwise"></i> 刷新
-      </button>
+      <div class="btn-group btn-group-sm">
+        <button class="btn btn-outline-primary" onclick="loadProxies(currentPage)">刷新</button>
+        <button class="btn btn-outline-info" onclick="checkAllProxies()">验证全部</button>
+        <button class="btn btn-outline-warning" onclick="clearInvalid()">清理无效</button>
+      </div>
     </div>
     <div class="card-body">
-      <table class="table table-striped table-hover">
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>代理地址</th>
-            <th>类型</th>
-            <th>状态</th>
-            <th>成功/失败</th>
-            <th>响应时间</th>
-            <th>最后使用</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody id="proxy-list"></tbody>
-      </table>
+      <div class="table-responsive">
+        <table class="table table-striped table-hover align-middle">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>代理地址</th>
+              <th>类型</th>
+              <th>来源/认证</th>
+              <th>状态</th>
+              <th>成功/失败</th>
+              <th>响应时间</th>
+              <th>最后使用</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="proxy-list"></tbody>
+        </table>
+      </div>
       <nav><ul class="pagination" id="pagination"></ul></nav>
     </div>
   </div>
 </div>
+{% endblock %}
 
-<!-- 添加隧道代理模态框 -->
-<div class="modal fade" id="addTunnelModal" tabindex="-1">
-  <div class="modal-dialog">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title">添加隧道代理</h5>
-        <button
-          type="button"
-          class="btn-close"
-          data-bs-dismiss="modal"
-        ></button>
-      </div>
-      <div class="modal-body">
-        <form id="addTunnelForm">
-          <div class="mb-3">
-            <label class="form-label">隧道地址</label>
-            <input
-              type="text"
-              class="form-control"
-              name="tunnel"
-              required
-              placeholder="m684.kdltps.com:15818"
-            />
-            <small class="text-muted">从快代理控制台获取</small>
-          </div>
-          <div class="mb-3">
-            <label class="form-label">用户名</label>
-            <input
-              type="text"
-              class="form-control"
-              name="username"
-              required
-              placeholder="t16830587788937"
-            />
-          </div>
-          <div class="mb-3">
-            <label class="form-label">密码</label>
-            <input
-              type="text"
-              class="form-control"
-              name="password"
-              required
-              placeholder="0l3cm2d4"
-            />
-          </div>
-          <div class="mb-3">
-            <label class="form-label">备注</label>
-            <input
-              type="text"
-              class="form-control"
-              name="remark"
-              value="快代理隧道"
-            />
-          </div>
-        </form>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
-          取消
-        </button>
-        <button
-          type="button"
-          class="btn btn-primary"
-          onclick="addTunnelProxy()"
-        >
-          添加
-        </button>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- 添加私密代理模态框 -->
-<div class="modal fade" id="addPrivateModal" tabindex="-1">
-  <div class="modal-dialog">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title">添加私密代理</h5>
-        <button
-          type="button"
-          class="btn-close"
-          data-bs-dismiss="modal"
-        ></button>
-      </div>
-      <div class="modal-body">
-        <form id="addPrivateForm">
-          <div class="mb-3">
-            <label class="form-label">提取API地址</label>
-            <input
-              type="text"
-              class="form-control"
-              name="api_url"
-              required
-              placeholder="https://dps.kdlapi.com/api/getdps/?secret_id=xxx&signature=xxx&num=1"
-            />
-            <small class="text-muted">从快代理控制台获取完整API链接</small>
-          </div>
-          <div class="mb-3">
-            <label class="form-label">用户名</label>
-            <input
-              type="text"
-              class="form-control"
-              name="username"
-              required
-              placeholder="d1171395283"
-            />
-          </div>
-          <div class="mb-3">
-            <label class="form-label">密码</label>
-            <input
-              type="text"
-              class="form-control"
-              name="password"
-              required
-              placeholder="tzo3hlb4"
-            />
-          </div>
-          <div class="mb-3">
-            <label class="form-label">备注</label>
-            <input
-              type="text"
-              class="form-control"
-              name="remark"
-              value="快代理私密"
-            />
-          </div>
-        </form>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
-          取消
-        </button>
-        <button
-          type="button"
-          class="btn btn-primary"
-          onclick="addPrivateProxy()"
-        >
-          获取并添加
-        </button>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- 配置管理模态框 -->
-<div class="modal fade" id="configModal" tabindex="-1">
-  <div class="modal-dialog modal-lg">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title">代理配置管理</h5>
-        <button
-          type="button"
-          class="btn-close"
-          data-bs-dismiss="modal"
-        ></button>
-      </div>
-      <div class="modal-body">
-        <div id="config-list" class="mb-3"></div>
-        <hr />
-        <h6>添加新配置</h6>
-        <form id="addConfigForm">
-          <div class="row">
-            <div class="col-md-6 mb-3">
-              <label class="form-label">配置名称</label>
-              <input
-                type="text"
-                class="form-control"
-                name="name"
-                required
-                placeholder="我的代理配置"
-              />
-            </div>
-            <div class="col-md-6 mb-3">
-              <label class="form-label">代理类型</label>
-              <select
-                class="form-select"
-                name="proxy_type"
-                onchange="toggleConfigFields(this.value)"
-              >
-                <option value="tunnel">隧道代理</option>
-                <option value="private">私密代理</option>
-              </select>
-            </div>
-          </div>
-          <div id="tunnel-fields">
-            <div class="mb-3">
-              <label class="form-label">隧道地址</label>
-              <input
-                type="text"
-                class="form-control"
-                name="tunnel_addr"
-                placeholder="m684.kdltps.com:15818"
-              />
-            </div>
-          </div>
-          <div id="private-fields" style="display: none">
-            <div class="mb-3">
-              <label class="form-label">提取API地址</label>
-              <input
-                type="text"
-                class="form-control"
-                name="api_url"
-                placeholder="https://dps.kdlapi.com/api/getdps/?..."
-              />
-            </div>
-          </div>
-          <div class="row">
-            <div class="col-md-6 mb-3">
-              <label class="form-label">用户名</label>
-              <input type="text" class="form-control" name="username" />
-            </div>
-            <div class="col-md-6 mb-3">
-              <label class="form-label">密码</label>
-              <input type="password" class="form-control" name="password" />
-            </div>
-          </div>
-          <div class="row" id="refresh-fields">
-            <div class="col-md-4 mb-3">
-              <label class="form-label">每次获取数量</label>
-              <input
-                type="number"
-                class="form-control"
-                name="fetch_num"
-                value="10"
-                min="1"
-                max="100"
-              />
-            </div>
-            <div class="col-md-4 mb-3">
-              <label class="form-label">刷新间隔（秒）</label>
-              <input
-                type="number"
-                class="form-control"
-                name="refresh_interval"
-                value="300"
-                min="60"
-              />
-            </div>
-            <div class="col-md-4 mb-3">
-              <label class="form-label">自动刷新</label>
-              <div class="form-check mt-2">
-                <input
-                  type="checkbox"
-                  class="form-check-input"
-                  name="auto_refresh"
-                  id="auto_refresh"
-                />
-                <label class="form-check-label" for="auto_refresh"
-                  >启用自动刷新</label
-                >
-              </div>
-            </div>
-          </div>
-        </form>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
-          关闭
-        </button>
-        <button type="button" class="btn btn-primary" onclick="addConfig()">
-          添加配置
-        </button>
-      </div>
-    </div>
-  </div>
-</div>
-
+{% block scripts %}
 <script>
   let currentPage = 1;
   const pageSize = 20;
 
+  function escapeHtml(value) {
+    return String(value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
+  function formatDate(value) {
+    if (!value) return "-";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "-";
+    return date.toLocaleString("zh-CN", { hour12: false }).replace(/\//g, "-");
+  }
+
+  function proxyTypeBadge(type) {
+    if (type === "tunnel") return '<span class="badge bg-primary">隧道</span>';
+    if (type === "private") return '<span class="badge bg-success">私密</span>';
+    return '<span class="badge bg-secondary">普通</span>';
+  }
+
   async function loadStats() {
     const resp = await fetch("/api/proxies/stats");
     const data = await resp.json();
-    document.getElementById("stat-total").textContent = data.total;
-    document.getElementById("stat-valid").textContent = data.valid;
-    document.getElementById("stat-invalid").textContent = data.invalid;
+    document.getElementById("stat-total").textContent = data.total || 0;
+    document.getElementById("stat-valid").textContent = data.valid || 0;
     document.getElementById("stat-tunnel").textContent = data.tunnel || 0;
     document.getElementById("stat-private").textContent = data.private || 0;
-    document.getElementById("stat-success-rate").textContent =
-      data.success_rate || 0;
-    document.getElementById("stat-requests").textContent =
-      data.total_requests || 0;
-    document.getElementById("stat-avg-time").textContent =
-      data.avg_response_time || 0;
-    document.getElementById("stat-success").textContent =
-      data.total_success || 0;
-    document.getElementById("stat-fail").textContent = data.total_fail || 0;
+    document.getElementById("stat-success-rate").textContent = data.success_rate || 0;
+    document.getElementById("stat-requests").textContent = data.total_requests || 0;
+    document.getElementById("stat-avg-time").textContent = data.avg_response_time || 0;
   }
 
   async function loadProxies(page = 1) {
     currentPage = page;
     const resp = await fetch(`/api/proxies?page=${page}&page_size=${pageSize}`);
     const data = await resp.json();
-
     const tbody = document.getElementById("proxy-list");
-    tbody.innerHTML = data.items
-      .map(
-        (p) => `
-    <tr>
-      <td>${p.id}</td>
-      <td><code>${p.ip}:${p.port}</code></td>
-      <td>
-        ${
-          p.proxy_type === "tunnel"
-            ? '<span class="badge bg-primary">隧道</span>'
-            : p.proxy_type === "private"
-            ? '<span class="badge bg-success">私密</span>'
-            : '<span class="badge bg-secondary">直连</span>'
-        }
-      </td>
-      <td>
-        <span class="badge ${p.is_active ? "bg-success" : "bg-secondary"}">${
-          p.is_active ? "启用" : "禁用"
-        }</span>
-        <span class="badge ${p.is_valid ? "bg-info" : "bg-danger"}">${
-          p.is_valid ? "有效" : "无效"
-        }</span>
-      </td>
-      <td><span class="text-success">${
-        p.success_count
-      }</span> / <span class="text-danger">${
-          p.total_fail_count || 0
-        }</span></td>
-      <td>${p.response_time ? p.response_time.toFixed(0) + "ms" : "-"}</td>
-      <td>${
-        p.last_used_at ? new Date(p.last_used_at).toLocaleString() : "-"
-      }</td>
-      <td>
-        <button class="btn btn-sm btn-outline-primary" onclick="checkProxy(${
-          p.id
-        })">验证</button>
-        <button class="btn btn-sm btn-outline-warning" onclick="toggleProxy(${
-          p.id
-        })">${p.is_active ? "禁用" : "启用"}</button>
-        <button class="btn btn-sm btn-outline-danger" onclick="deleteProxy(${
-          p.id
-        })">删除</button>
-      </td>
-    </tr>
-  `
-      )
-      .join("");
 
-    const totalPages = Math.ceil(data.total / pageSize);
+    if (!data.items || data.items.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">暂无代理</td></tr>';
+    } else {
+      tbody.innerHTML = data.items
+        .map(
+          (p) => `
+            <tr>
+              <td>${p.id}</td>
+              <td><code>${escapeHtml(p.protocol || "http")}://${escapeHtml(p.ip)}:${p.port}</code></td>
+              <td>${proxyTypeBadge(p.proxy_type)}</td>
+              <td>
+                <span class="badge bg-light text-dark">${escapeHtml(p.source || "-")}</span>
+                ${
+                  p.username
+                    ? `<span class="badge bg-info text-dark">${escapeHtml(p.username)}${p.has_password ? " / 密码" : ""}</span>`
+                    : '<span class="badge bg-secondary">无认证</span>'
+                }
+              </td>
+              <td>
+                <span class="badge ${p.is_active ? "bg-success" : "bg-secondary"}">${p.is_active ? "启用" : "禁用"}</span>
+                <span class="badge ${p.is_valid ? "bg-info" : "bg-danger"}">${p.is_valid ? "有效" : "无效"}</span>
+              </td>
+              <td><span class="text-success">${p.success_count || 0}</span> / <span class="text-danger">${p.total_fail_count || 0}</span></td>
+              <td>${p.response_time ? p.response_time.toFixed(0) + "ms" : "-"}</td>
+              <td>${formatDate(p.last_used_at)}</td>
+              <td>
+                <button class="btn btn-sm btn-outline-primary" onclick="checkProxy(${p.id})">验证</button>
+                <button class="btn btn-sm btn-outline-warning" onclick="toggleProxy(${p.id})">${p.is_active ? "禁用" : "启用"}</button>
+                <button class="btn btn-sm btn-outline-danger" onclick="deleteProxy(${p.id})">删除</button>
+              </td>
+            </tr>
+          `
+        )
+        .join("");
+    }
+
+    const totalPages = Math.ceil((data.total || 0) / pageSize);
     const pagination = document.getElementById("pagination");
     pagination.innerHTML = "";
     for (let i = 1; i <= totalPages; i++) {
-      pagination.innerHTML += `<li class="page-item ${
-        i === page ? "active" : ""
-      }"><a class="page-link" href="#" onclick="loadProxies(${i})">${i}</a></li>`;
+      pagination.innerHTML += `<li class="page-item ${i === page ? "active" : ""}"><a class="page-link" href="#" onclick="loadProxies(${i}); return false;">${i}</a></li>`;
     }
     loadStats();
   }
 
-  function showAddTunnelModal() {
-    new bootstrap.Modal(document.getElementById("addTunnelModal")).show();
-  }
-
-  function showAddPrivateModal() {
-    new bootstrap.Modal(document.getElementById("addPrivateModal")).show();
-  }
-
-  async function addTunnelProxy() {
-    const form = document.getElementById("addTunnelForm");
-    const data = Object.fromEntries(new FormData(form));
-    const resp = await fetch("/api/proxies/tunnel", {
+  async function importProxies() {
+    const data = {
+      text: document.getElementById("proxy-import-text").value,
+      protocol: document.getElementById("import-protocol").value,
+      proxy_type: document.getElementById("import-type").value,
+      source: document.getElementById("import-source").value,
+      username: document.getElementById("import-username").value,
+      password: document.getElementById("import-password").value,
+      remark: document.getElementById("import-remark").value,
+    };
+    const resp = await fetch("/api/proxies/import", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
     });
+    const result = await resp.json();
+    const resultBox = document.getElementById("import-result");
     if (resp.ok) {
-      bootstrap.Modal.getInstance(
-        document.getElementById("addTunnelModal")
-      ).hide();
-      form.reset();
-      alert("隧道代理添加成功！");
-      loadProxies();
+      const errors = (result.errors || [])
+        .map((e) => `第${e.line}行: ${escapeHtml(e.content)} - ${escapeHtml(e.error)}`)
+        .join("<br>");
+      resultBox.className = result.failed ? "alert alert-warning mb-0" : "alert alert-success mb-0";
+      resultBox.innerHTML = `新增 ${result.added}，更新 ${result.updated}，跳过 ${result.skipped}，失败 ${result.failed}`
+        + (errors ? `<hr>${errors}` : "");
+      resultBox.style.display = "block";
+      loadProxies(1);
     } else {
-      const err = await resp.json();
-      alert("添加失败: " + (err.detail || "未知错误"));
+      resultBox.className = "alert alert-danger mb-0";
+      resultBox.textContent = "导入失败: " + (result.detail || "未知错误");
+      resultBox.style.display = "block";
     }
   }
 
-  async function addPrivateProxy() {
-    const form = document.getElementById("addPrivateForm");
-    const data = Object.fromEntries(new FormData(form));
-    const resp = await fetch("/api/proxies/private", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
+  function buildExportUrl() {
+    const params = new URLSearchParams({
+      fmt: document.getElementById("export-format").value,
+      only_active: document.getElementById("export-active").checked ? "true" : "false",
+      only_valid: document.getElementById("export-valid").checked ? "true" : "false",
+      include_auth: document.getElementById("export-auth").checked ? "true" : "false",
     });
-    if (resp.ok) {
-      const result = await resp.json();
-      bootstrap.Modal.getInstance(
-        document.getElementById("addPrivateModal")
-      ).hide();
-      form.reset();
-      alert(`私密代理获取成功！共添加 ${result.added} 个代理`);
-      loadProxies();
-    } else {
-      const err = await resp.json();
-      alert("获取失败: " + (err.detail || "未知错误"));
-    }
+    return `/api/proxies/export?${params.toString()}`;
+  }
+
+  async function previewExportText() {
+    const resp = await fetch(buildExportUrl());
+    document.getElementById("export-preview").value = await resp.text();
+  }
+
+  async function copyExportText() {
+    const preview = document.getElementById("export-preview");
+    if (!preview.value) await previewExportText();
+    await navigator.clipboard.writeText(preview.value);
+    alert("已复制到剪贴板");
+  }
+
+  function downloadExportText() {
+    window.location.href = buildExportUrl();
   }
 
   async function deleteProxy(id) {
@@ -560,11 +370,7 @@ content %}
   async function checkProxy(id) {
     const resp = await fetch(`/api/proxies/${id}/check`, { method: "POST" });
     const data = await resp.json();
-    alert(
-      data.is_valid
-        ? `验证通过，响应时间: ${data.response_time?.toFixed(0)}ms`
-        : "验证失败"
-    );
+    alert(data.is_valid ? `验证通过，响应时间: ${data.response_time?.toFixed(0)}ms` : "验证失败");
     loadProxies(currentPage);
   }
 
@@ -584,129 +390,7 @@ content %}
     loadProxies();
   }
 
-  // 配置管理
-  function showConfigModal() {
-    loadConfigs();
-    new bootstrap.Modal(document.getElementById("configModal")).show();
-  }
-
-  function toggleConfigFields(type) {
-    document.getElementById("tunnel-fields").style.display =
-      type === "tunnel" ? "block" : "none";
-    document.getElementById("private-fields").style.display =
-      type === "private" ? "block" : "none";
-  }
-
-  async function loadConfigs() {
-    const resp = await fetch("/api/proxies/configs");
-    const data = await resp.json();
-    const container = document.getElementById("config-list");
-
-    if (data.items.length === 0) {
-      container.innerHTML = '<p class="text-muted">暂无配置</p>';
-      return;
-    }
-
-    container.innerHTML = data.items
-      .map(
-        (c) => `
-    <div class="card mb-2">
-      <div class="card-body py-2">
-        <div class="d-flex justify-content-between align-items-center">
-          <div>
-            <strong>${c.name}</strong>
-            <span class="badge ${
-              c.proxy_type === "tunnel" ? "bg-primary" : "bg-success"
-            } ms-2">${c.proxy_type === "tunnel" ? "隧道" : "私密"}</span>
-            ${
-              c.auto_refresh
-                ? '<span class="badge bg-info ms-1">自动刷新</span>'
-                : ""
-            }
-            <br>
-            <small class="text-muted">
-              ${
-                c.proxy_type === "tunnel"
-                  ? "隧道: " + (c.tunnel_addr || "-")
-                  : "API: " + (c.api_url?.substring(0, 50) || "-") + "..."
-              }
-              | 用户名: ${c.username || "-"}
-              ${c.proxy_type === "private" ? ` | 获取数量: ${c.fetch_num}` : ""}
-              ${c.auto_refresh ? ` | 间隔: ${c.refresh_interval}秒` : ""}
-            </small>
-          </div>
-          <div>
-            <button class="btn btn-sm btn-success" onclick="fetchFromConfig(${
-              c.id
-            })">获取代理</button>
-            <button class="btn btn-sm btn-danger" onclick="deleteConfig(${
-              c.id
-            })">删除</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  `
-      )
-      .join("");
-  }
-
-  async function addConfig() {
-    const form = document.getElementById("addConfigForm");
-    const formData = new FormData(form);
-    const data = {
-      name: formData.get("name"),
-      proxy_type: formData.get("proxy_type"),
-      tunnel_addr: formData.get("tunnel_addr"),
-      api_url: formData.get("api_url"),
-      username: formData.get("username"),
-      password: formData.get("password"),
-      fetch_num: parseInt(formData.get("fetch_num")) || 10,
-      refresh_interval: parseInt(formData.get("refresh_interval")) || 300,
-      auto_refresh: document.getElementById("auto_refresh").checked,
-    };
-    const resp = await fetch("/api/proxies/configs", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
-    });
-    if (resp.ok) {
-      form.reset();
-      loadConfigs();
-      alert("配置添加成功！");
-    } else {
-      alert("添加失败");
-    }
-  }
-
-  async function fetchFromConfig(id) {
-    const resp = await fetch(`/api/proxies/configs/${id}/fetch`, {
-      method: "POST",
-    });
-    const data = await resp.json();
-    alert(`获取完成，添加 ${data.added} 个代理`);
-    loadProxies();
-  }
-
-  async function deleteConfig(id) {
-    if (!confirm("确定删除此配置?")) return;
-    await fetch(`/api/proxies/configs/${id}`, { method: "DELETE" });
-    loadConfigs();
-  }
-
-  async function autoRefreshProxies() {
-    const resp = await fetch("/api/proxies/auto-refresh", { method: "POST" });
-    const data = await resp.json();
-    alert(
-      `自动刷新完成: 刷新了 ${data.refreshed_configs} 个配置，添加 ${data.added_proxies} 个代理`
-    );
-    loadProxies();
-  }
-
-  // 初始加载
   loadProxies();
-
-  // 每10秒自动刷新统计
   setInterval(loadStats, 10000);
 </script>
 {% endblock %}

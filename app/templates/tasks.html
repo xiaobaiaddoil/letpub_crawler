@@ -104,6 +104,14 @@
     <div class="flex-between">
         <h2>任务列表</h2>
         <div class="flex">
+            <input
+                type="search"
+                id="task-search"
+                placeholder="搜索ID/目标/Worker/错误"
+                style="width: 240px;"
+                oninput="debounceLoadTasks()"
+                onkeydown="if (event.key === 'Enter') loadTasks(1)"
+            >
             <select id="filter-status" onchange="filterTasks()">
                 <option value="">所有状态</option>
                 <option value="pending">待处理</option>
@@ -116,8 +124,14 @@
                 <option value="category">分类</option>
                 <option value="list">列表</option>
                 <option value="detail">详情</option>
+                <option value="comment">评论</option>
             </select>
-            <button class="btn btn-primary btn-sm" onclick="location.reload()">刷新</button>
+            <select id="task-page-size" onchange="loadTasks(1)">
+                <option value="20">20条/页</option>
+                <option value="50">50条/页</option>
+                <option value="100">100条/页</option>
+            </select>
+            <button class="btn btn-primary btn-sm" onclick="loadTasks(taskPage)">刷新</button>
         </div>
     </div>
     <table>
@@ -133,46 +147,10 @@
             </tr>
         </thead>
         <tbody id="tasks-table">
-            {% for task in tasks %}
-            <tr data-status="{{ task.status }}" data-type="{{ task.task_type }}">
-                <td>{{ task.id }}</td>
-                <td>
-                    {% if task.task_type == 'category' %}分类
-                    {% elif task.task_type == 'list' %}列表
-                    {% elif task.task_type == 'detail' %}详情
-                    {% else %}{{ task.task_type }}
-                    {% endif %}
-                </td>
-                <td>
-                    <span title="{{ task.target_url or '' }}">{{ task.target_id }}</span>
-                </td>
-                <td>
-                    <span class="status status-{{ task.status }}">
-                        {% if task.status == 'pending' %}待处理
-                        {% elif task.status == 'running' %}运行中
-                        {% elif task.status == 'completed' %}已完成
-                        {% elif task.status == 'failed' %}失败
-                        {% else %}{{ task.status }}
-                        {% endif %}
-                    </span>
-                </td>
-                <td>{{ task.retry_count }} / {{ task.max_retry }}</td>
-                <td class="text-small">{{ (task.created_at|localtime).strftime('%Y-%m-%d %H:%M') }}</td>
-                <td>
-                    {% if task.status == 'failed' %}
-                    <button class="btn btn-warning btn-sm" onclick="retryTask({{ task.id }})">重试</button>
-                    {% endif %}
-                    {% if task.status != 'running' %}
-                    <button class="btn btn-danger btn-sm" onclick="deleteTask({{ task.id }})">删除</button>
-                    {% endif %}
-                    {% if task.error_message %}
-                    <button class="btn btn-sm" onclick="showError('{{ task.error_message | replace("'", "\\'") | replace("\n", "\\n") }}')">查看错误</button>
-                    {% endif %}
-                </td>
-            </tr>
-            {% endfor %}
+            <tr><td colspan="7" class="text-center text-muted">加载中...</td></tr>
         </tbody>
     </table>
+    <div id="tasks-pagination" class="flex" style="margin-top: 10px; justify-content: center;"></div>
 </div>
 {% endblock %}
 
@@ -198,12 +176,54 @@
 </style>
 <script>
     let maxRetryPage = 1;
+    let taskPage = 1;
+    let taskSearchTimer = null;
+    const taskErrors = {};
 
     // 页面加载时获取统计
     document.addEventListener('DOMContentLoaded', () => {
         loadStats();
         loadMaxRetryTasks();
+        loadTasks();
     });
+
+    function escapeHtml(value) {
+        return String(value ?? '')
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#39;');
+    }
+
+    function taskTypeLabel(type) {
+        const labels = { category: '分类', list: '列表', detail: '详情', comment: '评论' };
+        return labels[type] || type || '-';
+    }
+
+    function statusLabel(status) {
+        const labels = { pending: '待处理', running: '运行中', completed: '已完成', failed: '失败' };
+        return labels[status] || status || '-';
+    }
+
+    function formatDate(value) {
+        if (!value) return '-';
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return '-';
+        return date.toLocaleString('zh-CN', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+        }).replace(/\//g, '-');
+    }
+
+    function debounceLoadTasks() {
+        clearTimeout(taskSearchTimer);
+        taskSearchTimer = setTimeout(() => loadTasks(1), 300);
+    }
 
     async function loadStats() {
         const response = await fetch('/api/tasks/stats');
@@ -232,10 +252,10 @@
             tbody.innerHTML = data.items.map(t => `
                 <tr>
                     <td>${t.id}</td>
-                    <td>${t.task_type === 'detail' ? '详情' : t.task_type === 'list' ? '列表' : t.task_type}</td>
-                    <td>${t.target_id}</td>
-                    <td>${t.retry_count} / 3</td>
-                    <td class="text-small">${t.error_message ? t.error_message.substring(0, 50) + '...' : '-'}</td>
+                    <td>${escapeHtml(taskTypeLabel(t.task_type))}</td>
+                    <td>${escapeHtml(t.target_id)}</td>
+                    <td>${t.retry_count} / ${t.max_retry || 3}</td>
+                    <td class="text-small">${t.error_message ? escapeHtml(t.error_message.substring(0, 50)) + '...' : '-'}</td>
                     <td>
                         <button class="btn btn-warning btn-sm" onclick="forceRetryTask(${t.id})">强制重试</button>
                     </td>
@@ -257,6 +277,7 @@
         if (result) {
             alert(result.message);
             loadMaxRetryTasks(maxRetryPage);
+            loadTasks(taskPage);
             loadStats();
         }
     }
@@ -267,6 +288,7 @@
         if (result) {
             alert(result.message);
             loadMaxRetryTasks();
+            loadTasks(taskPage);
             loadStats();
         }
     }
@@ -313,6 +335,7 @@
         if (result) {
             alert(result.message);
             loadStats();
+            loadTasks(1);
         }
     }
 
@@ -322,6 +345,7 @@
         if (result) {
             alert(result.message);
             loadStats();
+            loadTasks(1);
         }
     }
 
@@ -335,6 +359,7 @@
         if (result) {
             alert(result.message);
             loadStats();
+            loadTasks(1);
         }
     }
 
@@ -344,6 +369,7 @@
         if (result) {
             alert(result.message);
             loadStats();
+            loadTasks(1);
         }
     }
 
@@ -353,6 +379,7 @@
         if (result) {
             alert(result.message);
             loadStats();
+            loadTasks(1);
         }
     }
 
@@ -362,31 +389,91 @@
         if (result) {
             alert(result.message);
             loadStats();
+            loadTasks(1);
         }
     }
 
     function filterTasks() {
+        loadTasks(1);
+    }
+
+    async function loadTasks(page = 1) {
+        taskPage = page;
+        const tbody = document.getElementById('tasks-table');
+        const pagination = document.getElementById('tasks-pagination');
+        const params = new URLSearchParams({
+            page: String(page),
+            size: document.getElementById('task-page-size').value
+        });
         const status = document.getElementById('filter-status').value;
         const type = document.getElementById('filter-type').value;
-        const rows = document.querySelectorAll('#tasks-table tr');
+        const search = document.getElementById('task-search').value.trim();
+        if (status) params.set('status', status);
+        if (type) params.set('task_type', type);
+        if (search) params.set('search', search);
 
-        rows.forEach(row => {
-            const rowStatus = row.dataset.status;
-            const rowType = row.dataset.type;
-            let show = true;
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">加载中...</td></tr>';
 
-            if (status && rowStatus !== status) show = false;
-            if (type && rowType !== type) show = false;
+        try {
+            const response = await fetch(`/api/tasks/?${params.toString()}`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+            taskPage = data.page;
 
-            row.style.display = show ? '' : 'none';
-        });
+            if (!data.items || data.items.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">无匹配任务</td></tr>';
+            } else {
+                tbody.innerHTML = data.items.map(t => {
+                    taskErrors[t.id] = t.error_message || '';
+                    const actions = [];
+                    if (t.status === 'failed') {
+                        actions.push(`<button class="btn btn-warning btn-sm" onclick="retryTask(${t.id})">重试</button>`);
+                    }
+                    if (t.status !== 'running') {
+                        actions.push(`<button class="btn btn-danger btn-sm" onclick="deleteTask(${t.id})">删除</button>`);
+                    }
+                    if (t.error_message) {
+                        actions.push(`<button class="btn btn-sm" onclick="showTaskError(${t.id})">查看错误</button>`);
+                    }
+
+                    return `
+                        <tr data-status="${escapeHtml(t.status)}" data-type="${escapeHtml(t.task_type)}">
+                            <td>${t.id}</td>
+                            <td>${escapeHtml(taskTypeLabel(t.task_type))}</td>
+                            <td><span title="${escapeHtml(t.target_url || '')}">${escapeHtml(t.target_id)}</span></td>
+                            <td><span class="status status-${escapeHtml(t.status)}">${escapeHtml(statusLabel(t.status))}</span></td>
+                            <td>${t.retry_count} / ${t.max_retry}</td>
+                            <td class="text-small">${escapeHtml(formatDate(t.created_at))}</td>
+                            <td>${actions.join(' ') || '-'}</td>
+                        </tr>
+                    `;
+                }).join('');
+            }
+
+            const totalPages = Math.max(1, Math.ceil(data.total / data.size));
+            const start = data.total === 0 ? 0 : (data.page - 1) * data.size + 1;
+            const end = Math.min(data.page * data.size, data.total);
+            let paginationHtml = `<span class="text-small" style="padding: 5px 10px;">${start}-${end} / ${data.total}，第 ${data.page} / ${totalPages} 页</span>`;
+            if (data.page > 1) {
+                paginationHtml = `<button class="btn btn-sm" onclick="loadTasks(${data.page - 1})">上一页</button>` + paginationHtml;
+            }
+            if (data.page < totalPages) {
+                paginationHtml += `<button class="btn btn-sm" onclick="loadTasks(${data.page + 1})">下一页</button>`;
+            }
+            pagination.innerHTML = paginationHtml;
+        } catch (error) {
+            tbody.innerHTML = `<tr><td colspan="7" class="text-center text-danger">任务加载失败: ${escapeHtml(error.message)}</td></tr>`;
+            pagination.innerHTML = '';
+        }
     }
 
     async function retryTask(taskId) {
         const result = await apiCall(`/api/tasks/${taskId}/retry`);
         if (result) {
             alert(result.message);
-            location.reload();
+            loadTasks(taskPage);
+            loadMaxRetryTasks(maxRetryPage);
+            loadStats();
         }
     }
 
@@ -395,8 +482,13 @@
             const result = await fetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
             const data = await result.json();
             alert(data.message);
-            location.reload();
+            loadTasks(taskPage);
+            loadStats();
         }
+    }
+
+    function showTaskError(taskId) {
+        showError(taskErrors[taskId] || '');
     }
 
     function showError(message) {
@@ -435,6 +527,7 @@
             alert(result.message);
             document.getElementById('reset-journal-ids').value = '';
             loadStats();
+            loadTasks(1);
         } else {
             alert('操作失败: ' + (result.detail || result.message));
         }

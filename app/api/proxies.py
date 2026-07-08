@@ -1,5 +1,6 @@
 """代理池API"""
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, List
@@ -19,6 +20,16 @@ class ProxyCreate(BaseModel):
     port: int
     protocol: str = "http"
     proxy_type: str = "direct"  # direct 或 tunnel
+    username: Optional[str] = None
+    password: Optional[str] = None
+    remark: Optional[str] = None
+
+
+class ProxyImportRequest(BaseModel):
+    text: str
+    protocol: str = "http"
+    proxy_type: str = "private"
+    source: str = "manual"
     username: Optional[str] = None
     password: Optional[str] = None
     remark: Optional[str] = None
@@ -89,6 +100,9 @@ def list_proxies(
                 "proxy_type": p.proxy_type or "direct",
                 "source": p.source,
                 "area": p.area,
+                "username": p.username,
+                "has_password": bool(p.password),
+                "remark": p.remark,
                 "is_active": p.is_active,
                 "is_valid": p.is_valid,
                 "success_count": p.success_count,
@@ -122,6 +136,7 @@ async def get_random_proxy(db: Session = Depends(get_db)):
             "port": proxy.port,
             "protocol": proxy.protocol,
             "proxy_type": proxy.proxy_type or "direct",
+            "source": proxy.source,
             "username": proxy.username
         }
         # 解密密码返回给 worker
@@ -150,6 +165,47 @@ def add_proxy(data: ProxyCreate, db: Session = Depends(get_db)):
         remark=data.remark
     )
     return {"success": True, "id": proxy.id}
+
+
+@router.post("/import")
+def import_proxies(data: ProxyImportRequest, db: Session = Depends(get_db)):
+    """批量文本导入代理"""
+    service = ProxyService(db)
+    result = service.import_proxies_from_text(
+        text=data.text,
+        protocol=data.protocol,
+        source=data.source,
+        proxy_type=data.proxy_type,
+        username=data.username,
+        password=data.password,
+        remark=data.remark,
+    )
+    return {"success": True, **result}
+
+
+@router.get("/export")
+def export_proxies(
+    fmt: str = "hostport_auth",
+    only_active: bool = True,
+    only_valid: bool = False,
+    include_auth: bool = True,
+    db: Session = Depends(get_db)
+):
+    """导出代理文本"""
+    if fmt not in {"hostport", "hostport_auth", "url"}:
+        raise HTTPException(status_code=400, detail="fmt 仅支持 hostport/hostport_auth/url")
+    service = ProxyService(db)
+    content = service.export_proxies_as_text(
+        fmt=fmt,
+        only_active=only_active,
+        only_valid=only_valid,
+        include_auth=include_auth,
+    )
+    return Response(
+        content=content + ("\n" if content else ""),
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="proxies.txt"'},
+    )
 
 
 @router.post("/tunnel")

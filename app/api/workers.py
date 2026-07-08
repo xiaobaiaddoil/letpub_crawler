@@ -10,7 +10,7 @@ from sqlalchemy import func
 from app.database import get_db
 from app.models.worker import Worker, WorkerStatus
 from app.models.task import CrawlTask, TaskStatus
-from app.config import config
+from app.services.worker_status import is_worker_online
 
 logger = logging.getLogger(__name__)
 
@@ -54,18 +54,6 @@ class WorkerDetailResponse(BaseModel):
     running_tasks: List[dict]
     recent_completed: int
     recent_failed: int
-
-
-def is_worker_online(worker: Worker) -> bool:
-    """判断Worker是否在线（根据心跳超时）"""
-    if not worker.last_heartbeat:
-        return False
-    threshold = datetime.now(timezone.utc) - timedelta(seconds=config.WORKER_TIMEOUT)
-    # 处理时区问题
-    last_hb = worker.last_heartbeat
-    if last_hb.tzinfo is None:
-        last_hb = last_hb.replace(tzinfo=timezone.utc)
-    return last_hb >= threshold
 
 
 @router.get("", response_model=WorkerStatsResponse)
@@ -253,16 +241,12 @@ def release_worker_tasks(worker_id: str, db: Session = Depends(get_db)):
 
 @router.post("/cleanup-offline")
 def cleanup_offline_workers(db: Session = Depends(get_db)):
-    """清理离线Worker并释放其任务"""
-    threshold = datetime.now(timezone.utc) - timedelta(seconds=config.WORKER_TIMEOUT)
-
-    # 找到所有超时的Worker
-    offline_workers = db.query(Worker).filter(
-        Worker.last_heartbeat < threshold
-    ).all()
+    """清理离线Worker记录并释放其任务"""
+    all_workers = db.query(Worker).all()
+    offline_workers = [worker for worker in all_workers if not is_worker_online(worker)]
 
     released_tasks = 0
-    updated_workers = 0
+    deleted_workers = 0
 
     for worker in offline_workers:
         # 释放任务
@@ -277,16 +261,14 @@ def cleanup_offline_workers(db: Session = Depends(get_db)):
         })
         released_tasks += count
 
-        # 更新Worker状态
-        worker.status = WorkerStatus.OFFLINE
-        worker.current_task_count = 0
-        updated_workers += 1
+        db.delete(worker)
+        deleted_workers += 1
 
     db.commit()
 
     return {
-        "message": f"已处理 {updated_workers} 个离线Worker，释放 {released_tasks} 个任务",
-        "offline_workers": updated_workers,
+        "message": f"已删除 {deleted_workers} 个离线Worker记录，释放 {released_tasks} 个任务",
+        "offline_workers": deleted_workers,
         "released_tasks": released_tasks
     }
 
@@ -294,15 +276,9 @@ def cleanup_offline_workers(db: Session = Depends(get_db)):
 @router.get("/stats/summary")
 def get_workers_summary(db: Session = Depends(get_db)):
     """获取Worker统计摘要"""
-    threshold = datetime.now(timezone.utc) - timedelta(seconds=config.WORKER_TIMEOUT)
-
-    # 在线Worker数量
-    online_count = db.query(Worker).filter(
-        Worker.last_heartbeat >= threshold
-    ).count()
-
-    # 总Worker数量
-    total_count = db.query(Worker).count()
+    workers = db.query(Worker).all()
+    online_count = sum(1 for worker in workers if is_worker_online(worker))
+    total_count = len(workers)
 
     # 运行中的任务数
     running_tasks = db.query(CrawlTask).filter(

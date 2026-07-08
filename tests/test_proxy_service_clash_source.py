@@ -66,3 +66,19 @@ def test_non_clash_success_resets_fail_count(db):
     db.refresh(p)
     assert p.success_count == 1
     assert p.fail_count == 0
+
+
+@pytest.mark.asyncio
+async def test_clash_check_proxy_skips_external_probe(db, monkeypatch):
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("httpx AsyncClient should not be called for clash proxy")
+
+    monkeypatch.setattr("httpx.AsyncClient", fail_if_called)
+    p = _add(db, source="clash", is_valid=False)
+
+    result = await ProxyService(db).check_proxy(p)
+
+    db.refresh(p)
+    assert result is True
+    assert p.is_valid is True
+    assert p.last_check_at is not None

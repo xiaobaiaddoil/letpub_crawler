@@ -5,8 +5,10 @@ from datetime import datetime
 from typing import Sequence
 
 from sqlalchemy.orm import Session
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.models.category import Category
+from app.models.journal import Journal
 from app.models.journal_index import CategoryIndexState, CategoryJournalIndex, CategoryPageIndex
 
 
@@ -23,6 +25,49 @@ class IndexService:
 
     def __init__(self, db: Session):
         self.db = db
+
+    def _ensure_journals_exist(self, category: Category, journals: list[dict], now: datetime) -> None:
+        """Create minimal Journal rows required by category_journal_index FK."""
+        items_by_id: dict[int, dict] = {}
+        for item in journals:
+            journal_id = item.get("journal_id")
+            if not journal_id:
+                continue
+            items_by_id.setdefault(int(journal_id), item)
+
+        if not items_by_id:
+            return
+
+        existing_ids = {
+            row[0]
+            for row in self.db.query(Journal.journal_id)
+            .filter(Journal.journal_id.in_(items_by_id.keys()))
+            .all()
+        }
+        rows = []
+        for journal_id, item in items_by_id.items():
+            if journal_id in existing_ids:
+                continue
+            rows.append({
+                "journal_id": journal_id,
+                "name": item.get("name") or str(journal_id),
+                "category_id": category.id,
+                "created_at": now,
+                "updated_at": now,
+            })
+
+        if not rows:
+            return
+
+        bind = self.db.get_bind()
+        if bind and bind.dialect.name == "postgresql":
+            stmt = pg_insert(Journal).values(rows)
+            stmt = stmt.on_conflict_do_nothing(index_elements=["journal_id"])
+            self.db.execute(stmt)
+        else:
+            for row in rows:
+                self.db.add(Journal(**row))
+        self.db.flush()
 
     def update_category_state(self, category: Category, remote_total_count: int) -> CategoryIndexState:
         local_index_count = self.db.query(CategoryJournalIndex).filter(
@@ -65,6 +110,7 @@ class IndexService:
     def record_list_page(self, category: Category, page_no: int, journals: list[dict]) -> int:
         now = datetime.utcnow()
         journal_ids = [int(item["journal_id"]) for item in journals if item.get("journal_id")]
+        self._ensure_journals_exist(category, journals, now)
 
         page_index = self.db.query(CategoryPageIndex).filter(
             CategoryPageIndex.category_id == category.id,

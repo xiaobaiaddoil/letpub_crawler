@@ -14,6 +14,7 @@ from app.database import init_db, get_db, SessionLocal
 from app.api import tasks, data, workers, cookies, accounts, proxies, problems
 from app.services.crawler_service import crawler_service
 from app.services.task_manager import TaskManager
+from app.services.worker_status import is_worker_online, to_db_naive
 from app.logging_config import setup_app_logging, clean_old_logs
 
 # 初始化日志系统
@@ -29,18 +30,11 @@ templates = Jinja2Templates(directory=str(templates_dir))
 static_dir = Path(__file__).parent / "static"
 
 
-# 添加时区转换过滤器（UTC -> 本地时间，中国时区 UTC+8）
 def utc_to_local(utc_dt):
-    """将UTC时间转换为本地时间（UTC+8）"""
+    """模板时间显示：naive DB timestamp 按本地时间处理。"""
     if utc_dt is None:
         return None
-    from datetime import timezone, timedelta
-    # 确保有时区信息
-    if utc_dt.tzinfo is None:
-        utc_dt = utc_dt.replace(tzinfo=timezone.utc)
-    # 转换为 UTC+8
-    local_tz = timezone(timedelta(hours=8))
-    return utc_dt.astimezone(local_tz)
+    return to_db_naive(utc_dt)
 
 
 templates.env.filters["localtime"] = utc_to_local
@@ -270,14 +264,11 @@ async def resume_crawler():
 def crawler_status(db: Session = Depends(get_db)):
     """获取爬虫状态"""
     from app.models.worker import Worker
-    from datetime import datetime, timedelta, timezone
 
     if RUN_MODE == "master":
         # 主服务器模式：返回Worker状态
-        threshold = datetime.now(timezone.utc) - timedelta(seconds=config.WORKER_TIMEOUT)
-        online_workers = db.query(Worker).filter(
-            Worker.last_heartbeat >= threshold
-        ).count()
+        workers_list = db.query(Worker).all()
+        online_workers = sum(1 for worker in workers_list if is_worker_online(worker))
 
         return {
             "mode": "master",
@@ -305,7 +296,6 @@ async def update_cookie(request: Request):
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request, db: Session = Depends(get_db)):
     """控制面板页面"""
-    from datetime import datetime, timedelta, timezone
     from app.models.category import Category
     from app.models.journal import Journal
     from app.models.comment import Comment
@@ -321,12 +311,9 @@ async def dashboard(request: Request, db: Session = Depends(get_db)):
         "comments": db.query(Comment).count()
     }
 
-    # Worker统计
-    threshold = datetime.now(timezone.utc) - timedelta(seconds=config.WORKER_TIMEOUT)
-    online_workers = db.query(Worker).filter(
-        Worker.last_heartbeat >= threshold
-    ).count()
-    total_workers = db.query(Worker).count()
+    workers_list = db.query(Worker).all()
+    online_workers = sum(1 for worker in workers_list if is_worker_online(worker))
+    total_workers = len(workers_list)
 
     worker_stats = {
         "online": online_workers,
@@ -346,13 +333,10 @@ async def dashboard(request: Request, db: Session = Depends(get_db)):
     })
 
 @app.get("/tasks", response_class=HTMLResponse)
-async def tasks_page(request: Request, db: Session = Depends(get_db)):
+async def tasks_page(request: Request):
     """任务列表页面"""
-    from app.models.task import CrawlTask
-    tasks_list = db.query(CrawlTask).order_by(CrawlTask.created_at.desc()).limit(100).all()
     return templates.TemplateResponse("tasks.html", {
-        "request": request,
-        "tasks": tasks_list
+        "request": request
     })
 
 @app.get("/journals", response_class=HTMLResponse)
@@ -374,17 +358,15 @@ async def journals_page(request: Request, db: Session = Depends(get_db)):
 @app.get("/workers", response_class=HTMLResponse)
 async def workers_page(request: Request, db: Session = Depends(get_db)):
     """Worker管理页面"""
-    from datetime import datetime, timedelta, timezone
     from app.models.worker import Worker
     from app.models.task import CrawlTask, TaskStatus
 
-    threshold = datetime.now(timezone.utc) - timedelta(seconds=config.WORKER_TIMEOUT)
     workers_list = db.query(Worker).order_by(Worker.last_heartbeat.desc().nullslast()).all()
 
     # 为每个worker添加在线状态
     workers_data = []
     for w in workers_list:
-        is_online = w.last_heartbeat and w.last_heartbeat.replace(tzinfo=timezone.utc) >= threshold
+        online = is_worker_online(w)
         running_tasks = db.query(CrawlTask).filter(
             CrawlTask.worker_id == w.worker_id,
             CrawlTask.status == TaskStatus.RUNNING.value
@@ -392,7 +374,7 @@ async def workers_page(request: Request, db: Session = Depends(get_db)):
 
         workers_data.append({
             "worker": w,
-            "is_online": is_online,
+            "is_online": online,
             "running_tasks": running_tasks
         })
 

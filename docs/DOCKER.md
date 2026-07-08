@@ -160,9 +160,18 @@ docker/stop_local_worker.sh
 ```env
 # 多副本本地 worker 请保持 LOCAL_WORKER_ID 为空，让容器自动生成唯一 ID。
 LOCAL_WORKER_ID=
-LOCAL_WORKER_CONCURRENCY=2
+LOCAL_WORKER_CONCURRENCY=4
 LOCAL_WORKER_SCALE=1
 ```
+
+本机 worker 在 `docker-compose.yml` 中使用 host 网络，默认通过宿主机端口连接主节点服务：
+
+```env
+WORKER_DATABASE_URL=postgresql://letpub:change_me@127.0.0.1:15432/letpub_crawler_v2
+WORKER_MASTER_URL=http://127.0.0.1:8000
+```
+
+这样 worker 可以访问只监听宿主机 `127.0.0.1` 的 Clash/本地代理端口。若改回非 host 网络，需要把本地代理绑定到容器可访问的地址，并设置 `HOST_PROXY_HOST`。
 
 `app`/`web` 负责创建任务和管理界面，worker 通过同一个 PostgreSQL 使用 `FOR UPDATE SKIP LOCKED` 领取任务并执行。多台 worker 机器部署时，只要使用 worker 镜像，并把 `DATABASE_URL` 指向主节点数据库、`MASTER_URL` 指向主节点 Web 地址即可。
 
@@ -173,7 +182,7 @@ LETPUB_WORKER_IMAGE=letpub-crawler:worker
 DATABASE_URL=postgresql://letpub:change_me@<master-ip>:15432/letpub_crawler_v2
 MASTER_URL=http://<master-ip>:8000
 CRAWLER_WORKER_ID=worker-01
-PARALLEL_WORKERS=3
+PARALLEL_WORKERS=4
 ```
 
 ```bash

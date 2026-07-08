@@ -1,9 +1,12 @@
 """代理服务 - 管理代理池（支持隧道代理和私密代理）"""
 import logging
+import re
 import time
 import httpx
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, List, Dict
+from urllib.parse import unquote, urlparse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -12,6 +15,97 @@ from app.services.crypto import encrypt_password, decrypt_password
 from app.config import config
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ParsedProxy:
+    ip: str
+    port: int
+    protocol: str
+    username: Optional[str] = None
+    password: Optional[str] = None
+
+
+def parse_proxy_text_line(
+    line: str,
+    default_protocol: str = "http",
+    default_username: str | None = None,
+    default_password: str | None = None,
+) -> ParsedProxy:
+    """Parse one proxy text line.
+
+    Supported formats:
+    - host:port
+    - host:port:username:password
+    - username:password@host:port
+    - http://username:password@host:port
+    - host:port username password
+    """
+    raw = (line or "").strip()
+    if not raw:
+        raise ValueError("空行")
+    if raw.startswith("#"):
+        raise ValueError("注释行")
+
+    protocol = default_protocol or "http"
+    username = default_username or None
+    password = default_password or None
+
+    if "://" in raw:
+        parsed = urlparse(raw)
+        if not parsed.hostname or not parsed.port:
+            raise ValueError("URL格式应包含 host:port")
+        protocol = parsed.scheme or protocol
+        username = unquote(parsed.username) if parsed.username else username
+        password = unquote(parsed.password) if parsed.password else password
+        return ParsedProxy(
+            ip=parsed.hostname,
+            port=parsed.port,
+            protocol=protocol,
+            username=username,
+            password=password,
+        )
+
+    tokens = [part for part in re.split(r"[\s,|]+", raw) if part]
+    head = tokens[0]
+    if len(tokens) >= 3:
+        username = tokens[1]
+        password = tokens[2]
+
+    if "@" in head:
+        auth, host_port = head.rsplit("@", 1)
+        if ":" in auth:
+            username, password = auth.split(":", 1)
+        else:
+            username = auth
+    else:
+        host_port = head
+
+    parts = host_port.split(":")
+    if len(parts) >= 4:
+        host = parts[0]
+        port_text = parts[1]
+        username = parts[2]
+        password = ":".join(parts[3:])
+    elif len(parts) == 2:
+        host, port_text = parts
+    else:
+        raise ValueError("格式应为 host:port 或 host:port:username:password")
+
+    try:
+        port = int(port_text)
+    except ValueError as exc:
+        raise ValueError("端口不是数字") from exc
+    if not host or port <= 0 or port > 65535:
+        raise ValueError("host或端口无效")
+
+    return ParsedProxy(
+        ip=host,
+        port=port,
+        protocol=protocol,
+        username=username or None,
+        password=password or None,
+    )
 
 
 class ProxyService:
@@ -105,6 +199,13 @@ class ProxyService:
 
     async def check_proxy(self, proxy: ProxyPool) -> bool:
         """验证代理是否可用"""
+        if proxy.source == "clash":
+            proxy.is_valid = True
+            proxy.last_check_at = datetime.now(timezone.utc)
+            self.db.commit()
+            logger.info(f"[代理] Clash入口 {proxy.ip}:{proxy.port} 跳过应用层外网探测")
+            return True
+
         try:
             start_time = time.time()
             
@@ -159,9 +260,9 @@ class ProxyService:
         
         return {"valid": valid, "invalid": invalid, "total": len(proxies)}
     
-    def add_proxy(self, ip: str, port: int, protocol: str = "http", 
+    def add_proxy(self, ip: str, port: int, protocol: str = "http",
                   source: str = "manual", proxy_type: str = "direct",
-                  username: str = None, password: str = None, 
+                  username: str = None, password: str = None,
                   remark: str = None) -> ProxyPool:
         """手动添加代理"""
         existing = self.db.query(ProxyPool).filter(
@@ -173,6 +274,8 @@ class ProxyService:
             existing.is_active = True
             existing.is_valid = True
             existing.fail_count = 0
+            existing.protocol = protocol
+            existing.source = source
             existing.proxy_type = proxy_type
             if username:
                 existing.username = username
@@ -196,6 +299,106 @@ class ProxyService:
         self.db.add(proxy)
         self.db.commit()
         return proxy
+
+    def import_proxies_from_text(
+        self,
+        text: str,
+        protocol: str = "http",
+        source: str = "manual",
+        proxy_type: str = "private",
+        username: str | None = None,
+        password: str | None = None,
+        remark: str | None = None,
+    ) -> Dict:
+        """Import proxies from pasted text."""
+        added = 0
+        updated = 0
+        skipped = 0
+        errors = []
+
+        for line_number, line in enumerate((text or "").splitlines(), start=1):
+            if not line.strip() or line.strip().startswith("#"):
+                skipped += 1
+                continue
+            try:
+                parsed = parse_proxy_text_line(
+                    line,
+                    default_protocol=protocol,
+                    default_username=username,
+                    default_password=password,
+                )
+                existed = self.db.query(ProxyPool).filter(
+                    ProxyPool.ip == parsed.ip,
+                    ProxyPool.port == parsed.port,
+                ).first() is not None
+                self.add_proxy(
+                    ip=parsed.ip,
+                    port=parsed.port,
+                    protocol=parsed.protocol,
+                    source=source,
+                    proxy_type=proxy_type,
+                    username=parsed.username,
+                    password=parsed.password,
+                    remark=remark,
+                )
+                if existed:
+                    updated += 1
+                else:
+                    added += 1
+            except Exception as exc:
+                errors.append({
+                    "line": line_number,
+                    "content": line.strip(),
+                    "error": str(exc),
+                })
+
+        return {
+            "added": added,
+            "updated": updated,
+            "skipped": skipped,
+            "failed": len(errors),
+            "errors": errors[:50],
+        }
+
+    def export_proxies_as_text(
+        self,
+        fmt: str = "hostport_auth",
+        only_active: bool = True,
+        only_valid: bool = False,
+        include_auth: bool = True,
+    ) -> str:
+        """Export proxy pool as plain text."""
+        query = self.db.query(ProxyPool)
+        if only_active:
+            query = query.filter(ProxyPool.is_active == True)
+        if only_valid:
+            query = query.filter(ProxyPool.is_valid == True)
+
+        lines = []
+        for proxy in query.order_by(ProxyPool.id.asc()).all():
+            password = None
+            if include_auth and proxy.password:
+                try:
+                    password = decrypt_password(proxy.password)
+                except Exception:
+                    password = None
+            username = proxy.username if include_auth else None
+            auth_available = bool(username and password)
+
+            if fmt == "url":
+                if auth_available:
+                    lines.append(f"{proxy.protocol}://{username}:{password}@{proxy.ip}:{proxy.port}")
+                else:
+                    lines.append(f"{proxy.protocol}://{proxy.ip}:{proxy.port}")
+            elif fmt == "hostport":
+                lines.append(f"{proxy.ip}:{proxy.port}")
+            else:
+                if auth_available:
+                    lines.append(f"{proxy.ip}:{proxy.port}:{username}:{password}")
+                else:
+                    lines.append(f"{proxy.ip}:{proxy.port}")
+
+        return "\n".join(lines)
     
     def add_tunnel_proxy(self, tunnel: str, username: str = None, password: str = None, 
                          remark: str = None) -> ProxyPool:

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from typing import List, Optional
 from pydantic import BaseModel
 from datetime import datetime, timedelta, timezone
@@ -19,6 +19,7 @@ class TaskResponse(BaseModel):
     target_url: Optional[str]
     status: str
     retry_count: int
+    max_retry: int
     error_message: Optional[str]
     worker_id: Optional[str]  # 执行该任务的worker标识
     locked_at: Optional[datetime]  # 任务锁定时间
@@ -35,13 +36,21 @@ class TaskStatsResponse(BaseModel):
     total: int
 
 
+class TaskListResponse(BaseModel):
+    total: int
+    page: int
+    size: int
+    items: List[TaskResponse]
+
+
 class FullRefreshRequest(BaseModel):
     limit: Optional[int] = None
 
-@router.get("/", response_model=List[TaskResponse])
+@router.get("/", response_model=TaskListResponse)
 def list_tasks(
     status: Optional[str] = None,
     task_type: Optional[str] = None,
+    search: Optional[str] = Query(None, description="任务ID、目标、Worker或错误信息关键字"),
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db)
@@ -53,10 +62,27 @@ def list_tasks(
         query = query.filter(CrawlTask.status == status)
     if task_type:
         query = query.filter(CrawlTask.task_type == task_type)
+    if search_text := (search or "").strip():
+        pattern = f"%{search_text}%"
+        conditions = [
+            CrawlTask.target_id.ilike(pattern),
+            CrawlTask.target_url.ilike(pattern),
+            CrawlTask.worker_id.ilike(pattern),
+            CrawlTask.error_message.ilike(pattern),
+        ]
+        if search_text.isdigit():
+            conditions.append(CrawlTask.id == int(search_text))
+        query = query.filter(or_(*conditions))
 
+    total = query.count()
     offset = (page - 1) * size
     tasks = query.order_by(CrawlTask.created_at.desc()).offset(offset).limit(size).all()
-    return tasks
+    return {
+        "total": total,
+        "page": page,
+        "size": size,
+        "items": [TaskResponse.model_validate(t) for t in tasks],
+    }
 
 @router.get("/stats", response_model=TaskStatsResponse)
 def get_stats(db: Session = Depends(get_db)):
@@ -91,6 +117,15 @@ def retry_all_failed(db: Session = Depends(get_db)):
             retried += 1
     return {"message": f"已重试 {retried} 个任务"}
 
+@router.delete("/completed")
+def clear_completed_tasks(db: Session = Depends(get_db)):
+    """清理已完成任务"""
+    count = db.query(CrawlTask).filter(
+        CrawlTask.status == TaskStatus.COMPLETED.value
+    ).delete()
+    db.commit()
+    return {"message": f"已清理 {count} 个已完成任务"}
+
 @router.delete("/{task_id}")
 def delete_task(task_id: int, db: Session = Depends(get_db)):
     """删除任务"""
@@ -104,15 +139,6 @@ def delete_task(task_id: int, db: Session = Depends(get_db)):
     db.delete(task)
     db.commit()
     return {"message": "任务已删除"}
-
-@router.delete("/completed")
-def clear_completed_tasks(db: Session = Depends(get_db)):
-    """清理已完成任务"""
-    count = db.query(CrawlTask).filter(
-        CrawlTask.status == TaskStatus.COMPLETED.value
-    ).delete()
-    db.commit()
-    return {"message": f"已清理 {count} 个已完成任务"}
 
 @router.post("/reset-detail/{journal_id}")
 def reset_detail_task(journal_id: int, db: Session = Depends(get_db)):

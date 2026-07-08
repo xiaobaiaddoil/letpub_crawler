@@ -221,9 +221,6 @@ class CrawlerService:
                 detail_task_count = 0
                 new_index_count = 0
 
-                if category:
-                    new_index_count = IndexService(db).record_list_page(category, page, journals)
-
                 for j_data in journals:
                     journal = db.query(Journal).filter(Journal.journal_id == j_data["journal_id"]).first()
                     if not journal:
@@ -254,6 +251,11 @@ class CrawlerService:
                     )
                     if detail_task:
                         detail_task_count += 1
+
+                if category:
+                    # category_journal_index has an FK to journals.journal_id, so
+                    # page indexes must be recorded after all page journals exist.
+                    new_index_count = IndexService(db).record_list_page(category, page, journals)
 
             tm.complete_task(task)
             logger.info(

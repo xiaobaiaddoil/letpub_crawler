@@ -78,6 +78,25 @@ uv run python tools/sync_clash.py
 同步完成: 58 节点。listener=127.0.0.1:30000。reload=成功。ProxyPool id=259
 ```
 
+### 长期守护
+
+推荐在宿主机长期运行 watcher。它会在以下情况自动重跑同步：
+
+- `profiles.yaml` 或当前 profile 文件变化（订阅更新、切换 profile）
+- `clash-verge.yaml` 中的 `crawler-pool` / `crawler-lb` 被覆盖
+- `127.0.0.1:30000` listener 不可达
+
+```bash
+DATABASE_URL=postgresql://letpub:letpub_password@127.0.0.1:15432/letpub_crawler_v2 \
+uv run python tools/sync_clash.py \
+  --profile-dir ~/.local/share/io.github.clash-verge-rev.clash-verge-rev \
+  --controller unix:///tmp/verge/verge-mihomo.sock \
+  --watch \
+  --interval 10
+```
+
+watcher 启动时默认先同步一次，之后每 10 秒检测一次。若不想启动时立即同步，可追加 `--no-sync-on-start`。
+
 ### 何时需重跑
 
 - Verge 订阅更新（节点列表变化）
