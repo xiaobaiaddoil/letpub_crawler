@@ -14,9 +14,10 @@
 
 `tools/sync_clash.py` 读 Verge 当前 profile，把节点名注入 mihomo 启动配置 `clash-verge.yaml`：
 - 顶层加多个 `listeners`，端口从 `listener_port` 开始连续递增
-- 每个 listener 直接绑定一个 Clash 节点，保证应用侧拿到不同 ProxyPool 记录时就是不同 Clash 出口节点
+- 每个 listener 直接绑定一个 Clash 节点
 - 调 mihomo external-controller `PUT /configs?force=true` 触发重载
-- ProxyPool 按节点写入多条条目（source=clash），爬虫透过 `/api/proxies/random` 取得
+- 通过每个 listener 探测实际出口 IP，同一出口 IP 只保留第一条
+- ProxyPool 按唯一出口写入多条条目（source=clash），爬虫透过 `/api/proxies/random` 取得
 
 ## 前置条件
 
@@ -75,9 +76,9 @@ uv run python tools/sync_clash.py
 输出示例：
 
 ```
-2026-05-16 21:40:56,170 [INFO] HTTP Request: PUT http://localhost/configs?force=true "HTTP/1.1 204 No Content"
-2026-05-16 21:40:56,171 [INFO] mihomo 已重载配置
-同步完成: 58 节点。listener=127.0.0.1:60000。reload=成功。ProxyPool id=259
+2026-07-08 21:10:38,360 [INFO] Clash 出口 IP 去重: 原始=63, 唯一出口=36, 重复IP=20, 探测失败=7
+2026-07-08 21:10:38,803 [INFO] mihomo 已重载配置
+同步完成: 63 原始节点，36 唯一出口节点。listener=127.0.0.1:60000。reload=成功。ProxyPool id=519
 ```
 
 ### 长期守护
@@ -93,11 +94,13 @@ DATABASE_URL=postgresql://<db-user>:<db-password>@127.0.0.1:15432/<db-name> \
 uv run python tools/sync_clash.py \
   --profile-dir ~/.local/share/io.github.clash-verge-rev.clash-verge-rev \
   --controller unix:///tmp/verge/verge-mihomo.sock \
+  --listener-port 60000 \
   --watch \
   --interval 10
 ```
 
 watcher 启动时默认先同步一次，之后每 10 秒检测一次。若不想启动时立即同步，可追加 `--no-sync-on-start`。
+如需跳过实际出口 IP 探测，仅按 profile 静态节点同步，可追加 `--no-egress-dedupe`。
 
 ### 何时需重跑
 
@@ -170,8 +173,8 @@ print('OK')
 | `curl -x 60000` 超时 | 节点全失活；查 Verge UI 节点延迟，或重启 Verge 后重跑 CLI |
 | `mapping key "proxy-groups" already defined` | 旧版工具 bug，已修。若仍见，从备份恢复 `clash-verge.yaml` 后重跑 |
 | ss 未见 60000 监听 | mihomo 未读到 listeners；用户手动切了 profile，重跑 CLI |
-| 出口 IP 始终为单节点 | HTTP keep-alive 黏单连接所致；爬虫已在 BaseCrawler 任务级重建 BrowserContext，正常使用无影响 |
-| 测试 round-robin 仅见 1 IP | 同上；测试代码须每次新建 `httpx.AsyncClient` |
+| ProxyPool 数量少于 Clash 节点数 | 正常；同步时按实际出口 IP 去重，重复出口和探测失败节点不会写入 active ProxyPool |
+| 某代理频繁失败 | 失败会降低后续分配权重；连续失败达到阈值后标记无效 |
 
 ### 查 mihomo 日志
 
