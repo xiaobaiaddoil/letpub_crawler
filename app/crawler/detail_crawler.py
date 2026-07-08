@@ -3,6 +3,7 @@ import logging
 import json
 import math
 import copy
+import asyncio
 from typing import Dict, List, Optional, Any
 import uuid
 import lxml.html
@@ -261,6 +262,32 @@ class DetailCrawler(BaseCrawler):
                     return True
         return False
 
+    @staticmethod
+    def _is_rate_limited_html(html: str) -> bool:
+        return "您请求页面的速度过快" in (html or "")
+
+    async def _fetch_detail_response(self, journal_id: int, url: str):
+        """获取详情页 HTML；遇到 LetPub 页面限流时等待后重试。"""
+        last_response = None
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            response = await self.request_http("GET", url, headers={
+                "User-Agent": config.USER_AGENTS[0],
+                "Referer": f"{config.BASE_URL}/index.php?page=journalapp",
+            })
+            last_response = response
+            if not self._is_rate_limited_html(response.text):
+                return response
+
+            wait_seconds = max(config.CRAWL_DELAY_MAX * attempt, 10)
+            logger.warning(
+                f"[限流] 期刊 {journal_id} 详情页触发请求过快提示，"
+                f"{wait_seconds}s 后重试 ({attempt}/{max_attempts})"
+            )
+            await asyncio.sleep(wait_seconds)
+
+        return last_response
+
     async def crawl(self, journal_id: int, validate: bool = True) -> Dict:
         if config.CRAWLER_FETCH_MODE == "browser":
             return await self._crawl_with_browser(journal_id, validate=validate)
@@ -288,12 +315,11 @@ class DetailCrawler(BaseCrawler):
         # 先建立登录会话。详情页部分字段也依赖登录态。
         cookie_value = await self.get_cookie_for_http()
 
-        response = await self.request_http("GET", url, headers={
-            "User-Agent": config.USER_AGENTS[0],
-            "Referer": f"{config.BASE_URL}/index.php?page=journalapp",
-        })
+        response = await self._fetch_detail_response(journal_id, url)
         if response.status_code != 200:
             raise Exception(f"无法访问详情页: {url}, HTTP {response.status_code}")
+        if self._is_rate_limited_html(response.text):
+            raise Exception(f"期刊 {journal_id} 详情页被 LetPub 限流，重试后仍未恢复")
 
         detail = {
             "journal_id": journal_id,
@@ -309,11 +335,8 @@ class DetailCrawler(BaseCrawler):
             refreshed_cookie = await self.get_cookie_for_http(force_login=True)
             if refreshed_cookie:
                 cookie_value = refreshed_cookie
-                response = await self.request_http("GET", url, headers={
-                    "User-Agent": config.USER_AGENTS[0],
-                    "Referer": f"{config.BASE_URL}/index.php?page=journalapp",
-                })
-                if response.status_code == 200:
+                response = await self._fetch_detail_response(journal_id, url)
+                if response.status_code == 200 and not self._is_rate_limited_html(response.text):
                     detail["basic_info"] = self._extract_basic_info_from_html(response.text)
 
         # 校验数据完整性
@@ -1096,6 +1119,7 @@ class DetailCrawler(BaseCrawler):
                 params=params,
                 headers=headers,
                 content="",
+                throttle=False,
             )
             logger.debug(f"[API请求] {response.url} [代理: {proxy_info}] -> {response.status_code}")
             return response.text

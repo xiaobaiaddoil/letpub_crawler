@@ -4,6 +4,7 @@ import logging
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from typing import Optional, Dict, TYPE_CHECKING
+from urllib.parse import urlparse
 import httpx
 from app.config import config
 from app.services.proxy_runtime import (
@@ -18,6 +19,9 @@ if TYPE_CHECKING:
     from playwright.async_api import Browser, Page, BrowserContext
 
 logger = logging.getLogger(__name__)
+
+_LETPUB_PAGE_REQUEST_LOCK = asyncio.Lock()
+_LAST_LETPUB_PAGE_REQUEST_AT = 0.0
 
 
 # 反检测注入脚本：消除 Playwright/Chromium 自动化特征，使指纹接近真实浏览器
@@ -132,10 +136,34 @@ class BaseCrawler(ABC):
             finally:
                 self.http_client = None
 
-    async def request_http(self, method: str, url: str, **kwargs) -> httpx.Response:
+    @staticmethod
+    def _should_throttle_url(url: str) -> bool:
+        host = urlparse(str(url)).hostname or ""
+        return host.endswith("letpub.com.cn")
+
+    async def _throttle_letpub_page_request(self):
+        """对 LetPub 页面请求做进程内节流，避免 HTTP 模式启动时并发打爆页面限流。"""
+        global _LAST_LETPUB_PAGE_REQUEST_AT
+
+        min_delay = max(0, config.CRAWL_DELAY_MIN)
+        max_delay = max(min_delay, config.CRAWL_DELAY_MAX)
+        delay = random.uniform(min_delay, max_delay)
+
+        async with _LETPUB_PAGE_REQUEST_LOCK:
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            wait_time = max(0.0, _LAST_LETPUB_PAGE_REQUEST_AT + delay - now)
+            if wait_time > 0:
+                logger.debug(f"[HTTP限速] 等待 {wait_time:.2f}s 后请求 LetPub 页面")
+                await asyncio.sleep(wait_time)
+            _LAST_LETPUB_PAGE_REQUEST_AT = loop.time()
+
+    async def request_http(self, method: str, url: str, throttle: bool = True, **kwargs) -> httpx.Response:
         """发起 HTTP 请求；代理失败时自动切换直连重试一次。"""
         await self.ensure_http_client()
         proxy_info = self.get_proxy_display()
+        if throttle and self._should_throttle_url(url):
+            await self._throttle_letpub_page_request()
         try:
             response = await self.http_client.request(method, url, **kwargs)
             logger.debug(f"[HTTP] {method.upper()} {url} [代理: {proxy_info}] -> {response.status_code}")

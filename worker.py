@@ -543,10 +543,14 @@ class DistributedWorker:
     # ------------------------------------------------------------------ #
 
     async def _consumer_loop(self, coroutine_id: int):
-        """持久消费者协程：独立拉取任务，完成即拉下一个。Browser 跨任务复用，只换 context。"""
+        """持久消费者协程：独立拉取任务，完成即拉下一个。
+
+        HTTP 模式复用 httpx client/session；browser 模式复用 browser，只换 context。
+        """
         logger.info(f"[消费者-{coroutine_id}] 启动")
         crawler = None
         current_crawler_type = None
+        fetch_mode = config.CRAWLER_FETCH_MODE
 
         while self._running:
             if self._paused:
@@ -570,19 +574,26 @@ class DistributedWorker:
 
                 if crawler is None:
                     crawler = CrawlerClass()
-                    await crawler.init_browser(use_proxy=True, use_cookie=use_cookie)
-                    current_crawler_type = task_type
-                    logger.info(f"[消费者-{coroutine_id}] 新建 browser type={task_type}")
-                else:
-                    try:
-                        await crawler.reset_context(use_cookie=use_cookie)
-                        logger.debug(f"[消费者-{coroutine_id}] 复用 browser，重置 context")
-                    except Exception as e:
-                        logger.warning(f"[消费者-{coroutine_id}] reset_context 失败({e})，重建 browser")
-                        await crawler.close()
-                        crawler = CrawlerClass()
+                    if fetch_mode == "browser":
                         await crawler.init_browser(use_proxy=True, use_cookie=use_cookie)
-                        current_crawler_type = task_type
+                        logger.info(f"[消费者-{coroutine_id}] 新建 browser type={task_type}")
+                    else:
+                        await crawler.init_http(use_proxy=True)
+                        logger.info(f"[消费者-{coroutine_id}] 新建 http client type={task_type}")
+                    current_crawler_type = task_type
+                else:
+                    if fetch_mode == "browser":
+                        try:
+                            await crawler.reset_context(use_cookie=use_cookie)
+                            logger.debug(f"[消费者-{coroutine_id}] 复用 browser，重置 context")
+                        except Exception as e:
+                            logger.warning(f"[消费者-{coroutine_id}] reset_context 失败({e})，重建 browser")
+                            await crawler.close()
+                            crawler = CrawlerClass()
+                            await crawler.init_browser(use_proxy=True, use_cookie=use_cookie)
+                            current_crawler_type = task_type
+                    else:
+                        logger.debug(f"[消费者-{coroutine_id}] 复用 http client")
             except Exception as e:
                 await self._fail_acquired_task(task, coroutine_id, e)
                 if crawler:
@@ -592,7 +603,7 @@ class DistributedWorker:
                 continue
 
             task_success = await self._execute_task(task, task_type, coroutine_id, crawler)
-            if not task_success or crawler.is_using_direct():
+            if not task_success or (fetch_mode == "browser" and crawler.is_using_direct()):
                 await crawler.close()
                 crawler = None
                 current_crawler_type = None
