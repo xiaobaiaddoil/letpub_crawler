@@ -47,6 +47,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-${DB_USER:?set DB_USER or POSTGRES_USER}}:${POSTGRES_PASSWORD:-${DB_PASSWORD:?set DB_PASSWORD or POSTGRES_PASSWORD}}@db:5432/${POSTGRES_DB:-${DB_NAME:-letpub_crawler_v2}}
       CRAWL_DELAY_MIN: ${CRAWL_DELAY_MIN:-3}
       CRAWL_DELAY_MAX: ${CRAWL_DELAY_MAX:-8}
+      CRAWLER_FETCH_MODE: ${CRAWLER_FETCH_MODE:-http}
       MAX_RETRY: ${MAX_RETRY:-3}
       PARALLEL_WORKERS: ${PARALLEL_WORKERS:-4}
       TASK_LOCK_TIMEOUT: ${TASK_LOCK_TIMEOUT:-600}
@@ -72,7 +73,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      target: ${WORKER_BUILD_TARGET:-worker-slim}
+      target: ${WORKER_BUILD_TARGET:-worker-http}
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-public.ecr.aws/docker/library/python:3.12-slim}
         PLAYWRIGHT_BASE_IMAGE: ${PLAYWRIGHT_BASE_IMAGE:-mcr.microsoft.com/playwright/python:v1.57.0-noble}
@@ -99,6 +100,7 @@ services:
       WORKER_ID: ${LOCAL_WORKER_ID:-${CRAWLER_WORKER_ID:-}}
       CRAWL_DELAY_MIN: ${CRAWL_DELAY_MIN:-3}
       CRAWL_DELAY_MAX: ${CRAWL_DELAY_MAX:-8}
+      CRAWLER_FETCH_MODE: ${CRAWLER_FETCH_MODE:-http}
       MAX_RETRY: ${MAX_RETRY:-3}
       PARALLEL_WORKERS: ${LOCAL_WORKER_CONCURRENCY:-${PARALLEL_WORKERS:-4}}
       TASK_LOCK_TIMEOUT: ${TASK_LOCK_TIMEOUT:-600}

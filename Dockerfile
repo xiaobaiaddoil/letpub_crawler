@@ -66,6 +66,11 @@ ENTRYPOINT ["/entrypoint.sh"]
 CMD ["worker"]
 
 
+FROM web AS worker-http
+
+CMD ["worker"]
+
+
 FROM web AS worker-slim
 
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium-headless-shell
