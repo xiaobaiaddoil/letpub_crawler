@@ -87,7 +87,7 @@ uv run python tools/sync_clash.py
 - `127.0.0.1:30000` listener 不可达
 
 ```bash
-DATABASE_URL=postgresql://letpub:letpub_password@127.0.0.1:15432/letpub_crawler_v2 \
+DATABASE_URL=postgresql://<db-user>:<db-password>@127.0.0.1:15432/<db-name> \
 uv run python tools/sync_clash.py \
   --profile-dir ~/.local/share/io.github.clash-verge-rev.clash-verge-rev \
   --controller unix:///tmp/verge/verge-mihomo.sock \

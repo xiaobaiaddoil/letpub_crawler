@@ -50,7 +50,7 @@ psql -h db-host -U postgres -d letpub_crawler -f migrations/004_add_workers_tabl
 **配置文件 `.env`:**
 ```env
 RUN_MODE=master
-DATABASE_URL=postgresql://user:pass@db-host:5432/letpub_crawler
+DATABASE_URL=postgresql://<db-user>:<db-password>@<db-host>:5432/<db-name>
 HOST=0.0.0.0
 PORT=8000
 CONSOLE_LOG_LEVEL=INFO
@@ -71,7 +71,7 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 **配置文件 `.env`:**
 ```env
-DATABASE_URL=postgresql://user:pass@db-host:5432/letpub_crawler
+DATABASE_URL=postgresql://<db-user>:<db-password>@<db-host>:5432/<db-name>
 WORKER_ID=worker-01
 HEARTBEAT_INTERVAL=30
 BATCH_SIZE=5

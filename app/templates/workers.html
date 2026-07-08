@@ -83,12 +83,12 @@
     <p><strong>主服务器配置:</strong></p>
     <pre>
 RUN_MODE=master
-DATABASE_URL=postgresql://user:pass@db-host:5432/letpub_crawler</pre
+DATABASE_URL=postgresql://&lt;db-user&gt;:&lt;db-password&gt;@&lt;db-host&gt;:5432/&lt;db-name&gt;</pre
     >
 
     <p><strong>Worker节点配置:</strong></p>
     <pre>
-DATABASE_URL=postgresql://user:pass@db-host:5432/letpub_crawler
+DATABASE_URL=postgresql://&lt;db-user&gt;:&lt;db-password&gt;@&lt;db-host&gt;:5432/&lt;db-name&gt;
 WORKER_ID=worker-01  # 可选，不设置则自动生成</pre
     >
 

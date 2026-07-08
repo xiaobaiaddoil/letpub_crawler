@@ -6,8 +6,8 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-${DB_NAME:-letpub_crawler_v2}}
-      POSTGRES_USER: ${POSTGRES_USER:-${DB_USER:-letpub}}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-${DB_PASSWORD:-letpub_password}}
+      POSTGRES_USER: ${POSTGRES_USER:-${DB_USER:?set DB_USER or POSTGRES_USER}}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-${DB_PASSWORD:?set DB_PASSWORD or POSTGRES_PASSWORD}}
       TZ: ${TZ:-Asia/Shanghai}
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-15432}:5432"
@@ -44,7 +44,7 @@ services:
       PORT: 8000
       RUN_MODE: ${RUN_MODE:-master}
       CRAWLER_AUTO_START: ${CRAWLER_AUTO_START:-false}
-      DATABASE_URL: postgresql://${POSTGRES_USER:-${DB_USER:-letpub}}:${POSTGRES_PASSWORD:-${DB_PASSWORD:-letpub_password}}@db:5432/${POSTGRES_DB:-${DB_NAME:-letpub_crawler_v2}}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-${DB_USER:?set DB_USER or POSTGRES_USER}}:${POSTGRES_PASSWORD:-${DB_PASSWORD:?set DB_PASSWORD or POSTGRES_PASSWORD}}@db:5432/${POSTGRES_DB:-${DB_NAME:-letpub_crawler_v2}}
       CRAWL_DELAY_MIN: ${CRAWL_DELAY_MIN:-3}
       CRAWL_DELAY_MAX: ${CRAWL_DELAY_MAX:-8}
       MAX_RETRY: ${MAX_RETRY:-3}
@@ -94,7 +94,7 @@ services:
       LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Shanghai}
       LOG_DIR: ${WORKER_LOG_DIR:-/app/logs/worker}
       RUN_MODE: worker
-      DATABASE_URL: ${WORKER_DATABASE_URL:-postgresql://${POSTGRES_USER:-${DB_USER:-letpub}}:${POSTGRES_PASSWORD:-${DB_PASSWORD:-letpub_password}}@127.0.0.1:${POSTGRES_PORT:-15432}/${POSTGRES_DB:-${DB_NAME:-letpub_crawler_v2}}}
+      DATABASE_URL: ${WORKER_DATABASE_URL:-postgresql://${POSTGRES_USER:-${DB_USER:?set DB_USER or POSTGRES_USER}}:${POSTGRES_PASSWORD:-${DB_PASSWORD:?set DB_PASSWORD or POSTGRES_PASSWORD}}@127.0.0.1:${POSTGRES_PORT:-15432}/${POSTGRES_DB:-${DB_NAME:-letpub_crawler_v2}}}
       MASTER_URL: ${WORKER_MASTER_URL:-http://127.0.0.1:${APP_PORT:-8000}}
       WORKER_ID: ${LOCAL_WORKER_ID:-${CRAWLER_WORKER_ID:-}}
       CRAWL_DELAY_MIN: ${CRAWL_DELAY_MIN:-3}

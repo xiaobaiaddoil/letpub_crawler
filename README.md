@@ -73,10 +73,10 @@ PARALLEL_WORKERS=4
 LOCAL_WORKER_CONCURRENCY=4
 ```
 
-本机 worker 在 `docker-compose.yml` 中使用 `host` 网络，默认连接：
+本机 worker 在 `docker-compose.yml` 中使用 `host` 网络，可通过以下变量覆盖连接：
 
 ```env
-WORKER_DATABASE_URL=postgresql://letpub:letpub_password@127.0.0.1:15432/letpub_crawler_v2
+WORKER_DATABASE_URL=postgresql://<db-user>:<db-password>@127.0.0.1:15432/<db-name>
 WORKER_MASTER_URL=http://127.0.0.1:8000
 ```
 
@@ -89,7 +89,7 @@ docker compose -f docker-compose.worker.yml up -d
 并设置：
 
 ```env
-DATABASE_URL=postgresql://letpub:<password>@<master-ip>:15432/letpub_crawler_v2
+DATABASE_URL=postgresql://<db-user>:<db-password>@<master-ip>:15432/<db-name>
 MASTER_URL=http://<master-ip>:8000
 CRAWLER_WORKER_ID=worker-01
 PARALLEL_WORKERS=4
@@ -115,7 +115,7 @@ worker -> http://127.0.0.1:30000 -> Clash crawler-pool -> 节点池
 同步当前 Clash profile：
 
 ```bash
-DATABASE_URL=postgresql://letpub:letpub_password@127.0.0.1:15432/letpub_crawler_v2 \
+DATABASE_URL=postgresql://<db-user>:<db-password>@127.0.0.1:15432/<db-name> \
 uv run python tools/sync_clash.py \
   --profile-dir ~/.local/share/io.github.clash-verge-rev.clash-verge-rev \
   --controller unix:///tmp/verge/verge-mihomo.sock
@@ -124,7 +124,7 @@ uv run python tools/sync_clash.py \
 推荐长期运行 watcher，避免 Clash 更新订阅或切换 profile 后覆盖 `127.0.0.1:30000` listener：
 
 ```bash
-DATABASE_URL=postgresql://letpub:letpub_password@127.0.0.1:15432/letpub_crawler_v2 \
+DATABASE_URL=postgresql://<db-user>:<db-password>@127.0.0.1:15432/<db-name> \
 uv run python tools/sync_clash.py \
   --profile-dir ~/.local/share/io.github.clash-verge-rev.clash-verge-rev \
   --controller unix:///tmp/verge/verge-mihomo.sock \
@@ -170,9 +170,9 @@ uv run pytest
 ```bash
 mkdir -p backups
 docker exec letpub-crawler-db-1 pg_dump \
-  -U letpub \
-  -d letpub_crawler_v2 \
-  -Fc > backups/letpub_crawler_v2.dump
+  -U <db-user> \
+  -d <db-name> \
+  -Fc > backups/<db-name>.dump
 ```
 
 实际容器名取决于 compose project 名称，可用 `docker ps` 查看。

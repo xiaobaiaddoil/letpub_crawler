@@ -221,7 +221,7 @@ async function batchRetry() {
 ```bash
 DEBUG=true
 CONSOLE_LOG_LEVEL=INFO
-DATABASE_URL=postgresql://postgre:123456@localhost:5432/letpub_crawler
+DATABASE_URL=postgresql://<db-user>:<db-password>@localhost:5432/<db-name>
 CRAWLER_AUTO_START=false
 ```
 
@@ -229,7 +229,7 @@ CRAWLER_AUTO_START=false
 ```bash
 DEBUG=false
 CONSOLE_LOG_LEVEL=WARNING
-DATABASE_URL=postgresql://postgre:password@192.168.0.110:5432/letpub_crawler
+DATABASE_URL=postgresql://<db-user>:<db-password>@<db-host>:5432/<db-name>
 CRAWLER_AUTO_START=true
 WORKER_ID=server1-prod
 ```

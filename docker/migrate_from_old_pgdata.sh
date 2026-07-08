@@ -18,9 +18,14 @@ if [ -f "$PROJECT_DIR/.env" ]; then
 fi
 
 POSTGRES_DB="${POSTGRES_DB:-${DB_NAME:-letpub_crawler_v2}}"
-POSTGRES_USER="${POSTGRES_USER:-${DB_USER:-letpub}}"
-POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-${DB_PASSWORD:-letpub_password}}"
+POSTGRES_USER="${POSTGRES_USER:-${DB_USER:-}}"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-${DB_PASSWORD:-}}"
 RESET_TARGET="${RESET_TARGET:-1}"
+
+if [ -z "$POSTGRES_USER" ] || [ -z "$POSTGRES_PASSWORD" ]; then
+  echo "POSTGRES_USER/DB_USER and POSTGRES_PASSWORD/DB_PASSWORD must be set" >&2
+  exit 1
+fi
 
 cleanup() {
   docker rm -f "$OLD_CONTAINER" >/dev/null 2>&1 || true

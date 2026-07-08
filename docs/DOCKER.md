@@ -164,10 +164,10 @@ LOCAL_WORKER_CONCURRENCY=4
 LOCAL_WORKER_SCALE=1
 ```
 
-本机 worker 在 `docker-compose.yml` 中使用 host 网络，默认通过宿主机端口连接主节点服务：
+本机 worker 在 `docker-compose.yml` 中使用 host 网络，可通过宿主机端口连接主节点服务：
 
 ```env
-WORKER_DATABASE_URL=postgresql://letpub:change_me@127.0.0.1:15432/letpub_crawler_v2
+WORKER_DATABASE_URL=postgresql://<db-user>:<db-password>@127.0.0.1:15432/<db-name>
 WORKER_MASTER_URL=http://127.0.0.1:8000
 ```
 
@@ -179,7 +179,7 @@ WORKER_MASTER_URL=http://127.0.0.1:8000
 
 ```env
 LETPUB_WORKER_IMAGE=letpub-crawler:worker
-DATABASE_URL=postgresql://letpub:change_me@<master-ip>:15432/letpub_crawler_v2
+DATABASE_URL=postgresql://<db-user>:<db-password>@<master-ip>:15432/<db-name>
 MASTER_URL=http://<master-ip>:8000
 CRAWLER_WORKER_ID=worker-01
 PARALLEL_WORKERS=4
