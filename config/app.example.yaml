@@ -60,6 +60,6 @@ clash:
   controller: "unix:///tmp/verge/verge-mihomo.sock"
   secret: "set-your-secret"
   # 注入的 listener 本地端口
-  listener_port: 30000
+  listener_port: 60000
   # crawler-pool 在 Merge 中的 group 名
   group_name: "crawler-pool"

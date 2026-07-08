@@ -92,6 +92,8 @@ class DistributedWorker:
         self.ip_address = self._get_ip_address()
         self._running = False
         self._paused = False
+        self._proxy_assignment_lock = asyncio.Lock()
+        self._consumer_proxy_ids: dict[int, int] = {}
 
         self.failed_html_dir = Path("logs/failed_html")
         self.failed_html_dir.mkdir(parents=True, exist_ok=True)
@@ -571,16 +573,33 @@ class DistributedWorker:
                 if crawler is not None and current_crawler_type != task_type:
                     await crawler.close()
                     crawler = None
+                    self._consumer_proxy_ids.pop(coroutine_id, None)
 
                 if crawler is None:
-                    crawler = CrawlerClass()
-                    if fetch_mode == "browser":
-                        await crawler.init_browser(use_proxy=True, use_cookie=use_cookie)
-                        logger.info(f"[消费者-{coroutine_id}] 新建 browser type={task_type}")
-                    else:
-                        await crawler.init_http(use_proxy=True)
-                        logger.info(f"[消费者-{coroutine_id}] 新建 http client type={task_type}")
-                    current_crawler_type = task_type
+                    async with self._proxy_assignment_lock:
+                        exclude_ids = [
+                            proxy_id
+                            for cid, proxy_id in self._consumer_proxy_ids.items()
+                            if cid != coroutine_id
+                        ]
+                        crawler = CrawlerClass()
+                        crawler.set_proxy_exclude_ids(exclude_ids)
+                        if fetch_mode == "browser":
+                            await crawler.init_browser(use_proxy=True, use_cookie=use_cookie)
+                            logger.info(f"[消费者-{coroutine_id}] 新建 browser type={task_type}")
+                        else:
+                            await crawler.init_http(use_proxy=True)
+                            logger.info(f"[消费者-{coroutine_id}] 新建 http client type={task_type}")
+                        proxy_info = crawler.get_current_proxy_info()
+                        if proxy_info and proxy_info.get("id"):
+                            self._consumer_proxy_ids[coroutine_id] = int(proxy_info["id"])
+                            logger.info(
+                                f"[消费者-{coroutine_id}] 分配代理 ID={proxy_info['id']} "
+                                f"(排除={exclude_ids})"
+                            )
+                        else:
+                            self._consumer_proxy_ids.pop(coroutine_id, None)
+                        current_crawler_type = task_type
                 else:
                     if fetch_mode == "browser":
                         try:
@@ -589,9 +608,20 @@ class DistributedWorker:
                         except Exception as e:
                             logger.warning(f"[消费者-{coroutine_id}] reset_context 失败({e})，重建 browser")
                             await crawler.close()
-                            crawler = CrawlerClass()
-                            await crawler.init_browser(use_proxy=True, use_cookie=use_cookie)
-                            current_crawler_type = task_type
+                            self._consumer_proxy_ids.pop(coroutine_id, None)
+                            async with self._proxy_assignment_lock:
+                                exclude_ids = [
+                                    proxy_id
+                                    for cid, proxy_id in self._consumer_proxy_ids.items()
+                                    if cid != coroutine_id
+                                ]
+                                crawler = CrawlerClass()
+                                crawler.set_proxy_exclude_ids(exclude_ids)
+                                await crawler.init_browser(use_proxy=True, use_cookie=use_cookie)
+                                proxy_info = crawler.get_current_proxy_info()
+                                if proxy_info and proxy_info.get("id"):
+                                    self._consumer_proxy_ids[coroutine_id] = int(proxy_info["id"])
+                                current_crawler_type = task_type
                     else:
                         logger.debug(f"[消费者-{coroutine_id}] 复用 http client")
             except Exception as e:
@@ -599,6 +629,7 @@ class DistributedWorker:
                 if crawler:
                     await crawler.close()
                     crawler = None
+                    self._consumer_proxy_ids.pop(coroutine_id, None)
                 current_crawler_type = None
                 continue
 
@@ -606,10 +637,12 @@ class DistributedWorker:
             if not task_success or (fetch_mode == "browser" and crawler.is_using_direct()):
                 await crawler.close()
                 crawler = None
+                self._consumer_proxy_ids.pop(coroutine_id, None)
                 current_crawler_type = None
 
         if crawler:
             await crawler.close()
+        self._consumer_proxy_ids.pop(coroutine_id, None)
         logger.info(f"[消费者-{coroutine_id}] 退出")
 
     # ------------------------------------------------------------------ #

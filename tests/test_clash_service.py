@@ -122,10 +122,9 @@ def test_render_merge_yaml_managed_header(service):
 def test_render_merge_yaml_structure(service):
     out = service.render_merge_yaml(["A", "B", "C"])
     data = _yaml.safe_load(out)
-    assert "proxy-groups" in data
     assert "listeners" in data
-    assert len(data["proxy-groups"]) == 1
-    assert len(data["listeners"]) == 1
+    assert "proxy-groups" not in data
+    assert len(data["listeners"]) == 3
 
 
 def test_render_merge_yaml_listener_port(service):
@@ -135,25 +134,22 @@ def test_render_merge_yaml_listener_port(service):
     assert listener["port"] == 31234
     assert listener["listen"] == "127.0.0.1"
     assert listener["type"] == "mixed"
-    assert listener["proxy"] == "crawler-pool"
+    assert listener["proxy"] == "A"
 
 
-def test_render_merge_yaml_group_proxies(service):
+def test_render_merge_yaml_one_listener_per_node(service):
     names = ["节点A", "节点B", "节点C"]
     out = service.render_merge_yaml(names)
     data = _yaml.safe_load(out)
-    group = data["proxy-groups"][0]
-    assert group["name"] == "crawler-pool"
-    assert group["type"] == "load-balance"
-    assert group["strategy"] == "round-robin"
-    assert group["proxies"] == names
+    assert [listener["proxy"] for listener in data["listeners"]] == names
+    assert [listener["port"] for listener in data["listeners"]] == [60000, 60001, 60002]
 
 
 def test_render_merge_yaml_custom_group_name(service):
     out = service.render_merge_yaml(["A"], group_name="my-pool")
     data = _yaml.safe_load(out)
-    assert data["proxy-groups"][0]["name"] == "my-pool"
-    assert data["listeners"][0]["proxy"] == "my-pool"
+    assert "proxy-groups" not in data
+    assert data["listeners"][0]["proxy"] == "A"
 
 
 def test_write_merge_creates_file(service, tmp_clash_dir):
@@ -280,24 +276,24 @@ async def test_reload_via_api_unix_socket(tmp_clash_dir, monkeypatch):
     assert captured["auth"] == "Bearer s"
 
 
-def test_sync_proxy_pool_inserts_single_entry(service, in_memory_db):
+def test_sync_proxy_pool_inserts_one_entry_per_node(service, in_memory_db):
     affected = service.sync_proxy_pool(
         db=in_memory_db,
-        node_count=42,
+        node_count=3,
         listener_port=30000,
     )
     from app.models.proxy_pool import ProxyPool
     rows = in_memory_db.query(ProxyPool).filter(
         ProxyPool.source == "clash"
-    ).all()
-    assert len(rows) == 1
+    ).order_by(ProxyPool.port.asc()).all()
+    assert len(rows) == 3
     p = rows[0]
     assert p.ip == "127.0.0.1"
     assert p.port == 30000
     assert p.protocol == "http"
     assert p.is_active is True
     assert p.is_valid is True
-    assert "42 nodes" in (p.remark or "")
+    assert [row.port for row in rows] == [30000, 30001, 30002]
     assert affected == p.id
 
 
@@ -313,8 +309,8 @@ def test_sync_proxy_pool_idempotent(service, in_memory_db):
         ProxyPool.source == "clash",
         ProxyPool.is_active == False,
     ).count()
-    assert active == 1
-    assert inactive == 1
+    assert active == 15
+    assert inactive == 10
 
 
 def test_sync_proxy_pool_changing_port_deactivates_old(service, in_memory_db):
@@ -324,7 +320,7 @@ def test_sync_proxy_pool_changing_port_deactivates_old(service, in_memory_db):
     new = in_memory_db.query(ProxyPool).filter(
         ProxyPool.source == "clash",
         ProxyPool.is_active == True,
-    ).one()
+    ).order_by(ProxyPool.port.asc()).first()
     assert new.port == 30001
 
 
@@ -339,13 +335,11 @@ def test_inject_runtime_config_appends_block(service, tmp_clash_dir):
     assert result_path == runtime
     data = _yaml.safe_load(runtime.read_text(encoding="utf-8"))
     assert data["mode"] == "rule"
-    groups = data["proxy-groups"]
-    assert any(g["name"] == "crawler-pool" for g in groups)
     listeners = data["listeners"]
-    assert any(
-        l["name"] == "crawler-lb" and l["port"] == 30000
-        for l in listeners
-    )
+    crawler_listeners = [l for l in listeners if l["name"].startswith("crawler-node-")]
+    assert len(crawler_listeners) == 2
+    assert [l["port"] for l in crawler_listeners] == [30000, 30001]
+    assert [l["proxy"] for l in crawler_listeners] == ["A", "B"]
 
 
 def test_inject_runtime_config_idempotent(service, tmp_clash_dir):
@@ -356,11 +350,11 @@ def test_inject_runtime_config_idempotent(service, tmp_clash_dir):
     service.inject_runtime_config(["X", "Y", "Z"], listener_port=30001)
     data = _yaml.safe_load(runtime.read_text(encoding="utf-8"))
     pools = [g for g in data["proxy-groups"] if g["name"] == "crawler-pool"]
-    assert len(pools) == 1
-    assert pools[0]["proxies"] == ["X", "Y", "Z"]
-    listeners = [l for l in data["listeners"] if l["name"] == "crawler-lb"]
-    assert len(listeners) == 1
-    assert listeners[0]["port"] == 30001
+    assert len(pools) == 0
+    listeners = [l for l in data["listeners"] if l["name"].startswith("crawler-node-")]
+    assert len(listeners) == 3
+    assert [l["port"] for l in listeners] == [30001, 30002, 30003]
+    assert [l["proxy"] for l in listeners] == ["X", "Y", "Z"]
 
 
 def test_inject_runtime_config_merges_with_existing_groups(service, tmp_clash_dir):
@@ -378,7 +372,7 @@ def test_inject_runtime_config_merges_with_existing_groups(service, tmp_clash_di
     data = _yaml.safe_load(runtime.read_text(encoding="utf-8"))
     names = [g["name"] for g in data["proxy-groups"]]
     assert "existing" in names
-    assert "crawler-pool" in names
+    assert "crawler-pool" not in names
 
 
 def test_inject_runtime_config_missing_runtime(service, tmp_clash_dir):

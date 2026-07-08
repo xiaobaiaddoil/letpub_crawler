@@ -127,31 +127,22 @@ class ClashService:
     def render_merge_yaml(
         self,
         proxy_names: List[str],
-        listener_port: int = 30000,
+        listener_port: int = 60000,
         group_name: str = "crawler-pool",
     ) -> str:
         """渲染 Merge.yaml 内容字符串，含 managed-by 标记头。"""
+        listeners = [
+            {
+                "name": f"crawler-node-{idx}",
+                "type": "mixed",
+                "port": listener_port + idx,
+                "listen": "127.0.0.1",
+                "proxy": proxy_name,
+            }
+            for idx, proxy_name in enumerate(proxy_names)
+        ]
         body = {
-            "proxy-groups": [
-                {
-                    "name": group_name,
-                    "type": "load-balance",
-                    "strategy": "round-robin",
-                    "url": "https://www.gstatic.com/generate_204",
-                    "interval": 300,
-                    "lazy": True,
-                    "proxies": list(proxy_names),
-                }
-            ],
-            "listeners": [
-                {
-                    "name": "crawler-lb",
-                    "type": "mixed",
-                    "port": listener_port,
-                    "listen": "127.0.0.1",
-                    "proxy": group_name,
-                }
-            ],
+            "listeners": listeners,
         }
         body_yaml = yaml.safe_dump(
             body,
@@ -192,7 +183,7 @@ class ClashService:
     def inject_runtime_config(
         self,
         proxy_names: List[str],
-        listener_port: int = 30000,
+        listener_port: int = 60000,
         group_name: str = "crawler-pool",
         runtime_filename: str = "clash-verge.yaml",
     ) -> Path:
@@ -213,34 +204,27 @@ class ClashService:
 
         groups = data.get("proxy-groups") or []
         groups = [g for g in groups if g.get("name") != group_name]
-        groups.append(
-            {
-                "name": group_name,
-                "type": "load-balance",
-                "strategy": "round-robin",
-                "url": "https://www.gstatic.com/generate_204",
-                "interval": 300,
-                "lazy": True,
-                "proxies": list(proxy_names),
-            }
-        )
         data["proxy-groups"] = groups
 
         listeners = data.get("listeners") or []
-        listener_name = "crawler-lb"
         listeners = [
             l for l in listeners
-            if l.get("name") != listener_name and l.get("port") != listener_port
+            if not str(l.get("name", "")).startswith("crawler-node-")
+            and not (
+                isinstance(l.get("port"), int)
+                and listener_port <= int(l.get("port")) < listener_port + len(proxy_names)
+            )
         ]
-        listeners.append(
-            {
-                "name": listener_name,
-                "type": "mixed",
-                "port": listener_port,
-                "listen": "127.0.0.1",
-                "proxy": group_name,
-            }
-        )
+        for idx, proxy_name in enumerate(proxy_names):
+            listeners.append(
+                {
+                    "name": f"crawler-node-{idx}",
+                    "type": "mixed",
+                    "port": listener_port + idx,
+                    "listen": "127.0.0.1",
+                    "proxy": proxy_name,
+                }
+            )
         data["listeners"] = listeners
 
         ts = int(time.time())
@@ -330,9 +314,9 @@ class ClashService:
         self,
         db: "Session",
         node_count: int,
-        listener_port: int = 30000,
+        listener_port: int = 60000,
     ) -> int:
-        """同步 ProxyPool：旧 source=clash 全下架，写入 1 条聚合条目。返回新插入条目的 id。"""
+        """同步 ProxyPool：旧 source=clash 全下架，按节点写入多条本地 listener。返回首条 id。"""
         from app.models.proxy_pool import ProxyPool
 
         db.query(ProxyPool).filter(
@@ -340,25 +324,30 @@ class ClashService:
             ProxyPool.is_active == True,
         ).update({"is_active": False}, synchronize_session=False)
 
-        entry = ProxyPool(
-            ip="127.0.0.1",
-            port=listener_port,
-            protocol="http",
-            proxy_type="direct",
-            source="clash",
-            area="local-clash",
-            is_active=True,
-            is_valid=True,
-            success_count=0,
-            fail_count=0,
-            total_fail_count=0,
-            remark=f"clash load-balance: {node_count} nodes",
-            created_at=datetime.now(timezone.utc),
-        )
-        db.add(entry)
+        entries = []
+        now = datetime.now(timezone.utc)
+        for idx in range(node_count):
+            entries.append(
+                ProxyPool(
+                    ip="127.0.0.1",
+                    port=listener_port + idx,
+                    protocol="http",
+                    proxy_type="direct",
+                    source="clash",
+                    area="local-clash",
+                    is_active=True,
+                    is_valid=True,
+                    success_count=0,
+                    fail_count=0,
+                    total_fail_count=0,
+                    remark=f"clash node listener {idx + 1}/{node_count}",
+                    created_at=now,
+                )
+            )
+        db.add_all(entries)
         db.commit()
-        db.refresh(entry)
-        return entry.id
+        db.refresh(entries[0])
+        return entries[0].id
 
 
 def _build_async_client() -> httpx.AsyncClient:

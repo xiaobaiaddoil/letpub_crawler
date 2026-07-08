@@ -17,7 +17,7 @@ def test_clash_defaults_when_section_missing(tmp_path, monkeypatch):
     assert cfg.CLASH_ENABLED is False
     assert cfg.CLASH_PROFILE_DIR == ""
     assert cfg.CLASH_CONTROLLER == "http://127.0.0.1:9097"
-    assert cfg.CLASH_LISTENER_PORT == 30000
+    assert cfg.CLASH_LISTENER_PORT == 60000
     assert cfg.CLASH_GROUP_NAME == "crawler-pool"
     assert cfg.HOST_PROXY_HOST == ""
 
@@ -58,6 +58,7 @@ def test_host_proxy_host_reads_yaml_and_env(tmp_path, monkeypatch):
 
 def test_crawler_fetch_mode_defaults_and_validates(tmp_path, monkeypatch):
     monkeypatch.setattr("app.config.CONFIG_DIR", tmp_path)
+    monkeypatch.delenv("CRAWLER_FETCH_MODE", raising=False)
     write_yaml(tmp_path / "app.yaml", {})
     write_yaml(tmp_path / "proxy.yaml", {})
 

@@ -139,8 +139,9 @@ class ProxyService:
         
         return proxy
     
-    async def get_random_proxy(self) -> Optional[ProxyPool]:
+    async def get_random_proxy(self, exclude_ids: Optional[list[int]] = None) -> Optional[ProxyPool]:
         """随机获取一个可用代理"""
+        exclude_ids = exclude_ids or []
         # 先统计各状态的代理数量
         total = self.db.query(ProxyPool).count()
         active = self.db.query(ProxyPool).filter(ProxyPool.is_active == True).count()
@@ -157,12 +158,23 @@ class ProxyService:
         if available == 0:
             logger.warning(f"[代理池] 无可用代理 - 总数:{total}, 启用:{active}, 有效:{valid}, 可用:{available}")
         
-        proxy = self.db.query(ProxyPool).filter(
+        query = self.db.query(ProxyPool).filter(
             ProxyPool.is_active == True,
             ProxyPool.is_valid == True,
             ProxyPool.fail_count < self.MAX_FAIL_COUNT
-        ).order_by(func.random()).first()
-        
+        )
+        if exclude_ids:
+            query = query.filter(~ProxyPool.id.in_(exclude_ids))
+
+        proxy = query.order_by(func.random()).first()
+        if proxy is None and exclude_ids:
+            logger.warning("[代理池] 排除已分配代理后无可用代理，回退到全量随机")
+            proxy = self.db.query(ProxyPool).filter(
+                ProxyPool.is_active == True,
+                ProxyPool.is_valid == True,
+                ProxyPool.fail_count < self.MAX_FAIL_COUNT
+            ).order_by(func.random()).first()
+
         if proxy:
             proxy.last_used_at = datetime.now(timezone.utc)
             self.db.commit()

@@ -28,16 +28,12 @@ def _write_basic_profile(tmp_clash_dir: Path):
 def _write_runtime_with_listener(tmp_clash_dir: Path, port: int = 30000):
     (tmp_clash_dir / "clash-verge.yaml").write_text(
         "mode: rule\n"
-        "proxy-groups:\n"
-        "  - name: crawler-pool\n"
-        "    type: load-balance\n"
-        "    proxies: [节点A]\n"
         "listeners:\n"
-        "  - name: crawler-lb\n"
+        "  - name: crawler-node-0\n"
         "    type: mixed\n"
         f"    port: {port}\n"
         "    listen: 127.0.0.1\n"
-        "    proxy: crawler-pool\n",
+        "    proxy: 节点A\n",
         encoding="utf-8",
     )
 
@@ -140,7 +136,7 @@ async def test_run_sync_full_flow(tmp_clash_dir, in_memory_db, monkeypatch):
     content = runtime.read_text(encoding="utf-8")
     assert "letpub-crawler" in content
     assert "节点A" in content
-    assert "crawler-pool" in content
+    assert "crawler-node-0" in content
     assert "listeners:" in content
 
     from app.models.proxy_pool import ProxyPool
@@ -148,8 +144,8 @@ async def test_run_sync_full_flow(tmp_clash_dir, in_memory_db, monkeypatch):
         ProxyPool.source == "clash",
         ProxyPool.is_active == True,
     ).all()
-    assert len(rows) == 1
-    assert rows[0].port == 30000
+    assert len(rows) == 3
+    assert sorted(row.port for row in rows) == [30000, 30001, 30002]
 
 
 @pytest.mark.asyncio
@@ -190,4 +186,4 @@ async def test_run_sync_reload_failure_still_writes_runtime(
     assert in_memory_db.query(ProxyPool).filter(
         ProxyPool.source == "clash",
         ProxyPool.is_active == True,
-    ).count() == 1
+    ).count() == 3

@@ -125,10 +125,15 @@ def get_stats(db: Session = Depends(get_db)):
 
 
 @router.get("/random")
-async def get_random_proxy(db: Session = Depends(get_db)):
+async def get_random_proxy(exclude_ids: str = "", db: Session = Depends(get_db)):
     """获取随机可用代理"""
     service = ProxyService(db)
-    proxy = await service.get_random_proxy()
+    excluded = []
+    for item in (exclude_ids or "").split(","):
+        item = item.strip()
+        if item.isdigit():
+            excluded.append(int(item))
+    proxy = await service.get_random_proxy(exclude_ids=excluded)
     if proxy:
         result = {
             "id": proxy.id,

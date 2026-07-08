@@ -80,7 +80,12 @@ class BaseCrawler(ABC):
         self._current_cookie_info: Optional[Dict] = None  # 当前使用的 Cookie 信息
         # 代理相关
         self._current_proxy_info: Optional[Dict] = None  # 当前使用的代理信息
+        self._proxy_exclude_ids: set[int] = set()
         self._using_direct: bool = False  # 是否使用直连（无代理）
+
+    def set_proxy_exclude_ids(self, proxy_ids):
+        """设置本 crawler 获取代理时应排除的代理 ID。"""
+        self._proxy_exclude_ids = {int(pid) for pid in (proxy_ids or []) if pid}
 
     async def init_http(self, use_proxy: bool = True):
         """初始化纯 HTTP 客户端。
@@ -98,6 +103,7 @@ class BaseCrawler(ABC):
         elif use_proxy:
             proxy_info = await self._get_proxy_from_pool()
             if proxy_info and not await self._probe_proxy(proxy_info):
+                await self.report_proxy_result(success=False)
                 self._current_proxy_info = None
                 proxy_info = None
 
@@ -379,8 +385,12 @@ class BaseCrawler(ABC):
             return None
 
         try:
+            params = {}
+            if self._proxy_exclude_ids:
+                params["exclude_ids"] = ",".join(str(pid) for pid in sorted(self._proxy_exclude_ids))
+
             async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(f"{config.MASTER_URL}/api/proxies/random")
+                response = await client.get(f"{config.MASTER_URL}/api/proxies/random", params=params)
                 if response.status_code == 200:
                     data = response.json()
                     if data.get("id"):
@@ -480,6 +490,7 @@ class BaseCrawler(ABC):
         if use_proxy:
             proxy_info = await self._get_proxy_from_pool()
             if proxy_info and not await self._probe_proxy(proxy_info):
+                await self.report_proxy_result(success=False)
                 self._current_proxy_info = None
                 proxy_info = None
 

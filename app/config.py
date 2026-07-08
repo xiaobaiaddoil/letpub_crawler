@@ -186,7 +186,7 @@ class Config:
     def CLASH_LISTENER_PORT(self) -> int:
         return env_int("CLASH_LISTENER_PORT", default=get_nested(
             self._app_config, "clash", "listener_port",
-            default=30000,
+            default=60000,
         ))
 
     @property

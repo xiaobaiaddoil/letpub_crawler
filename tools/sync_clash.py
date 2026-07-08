@@ -2,7 +2,7 @@
 
 用法:
     uv run python tools/sync_clash.py
-    uv run python tools/sync_clash.py --listener-port 30000
+    uv run python tools/sync_clash.py --listener-port 60000
     uv run python tools/sync_clash.py --watch --interval 10
 """
 from __future__ import annotations
@@ -52,21 +52,15 @@ def runtime_has_crawler_listener(
     except (OSError, yaml.YAMLError):
         return False
 
-    groups = data.get("proxy-groups") or []
     listeners = data.get("listeners") or []
 
-    has_group = any(
-        isinstance(group, dict) and group.get("name") == group_name
-        for group in groups
-    )
     has_listener = any(
         isinstance(listener, dict)
-        and listener.get("name") == "crawler-lb"
+        and listener.get("name") == "crawler-node-0"
         and int(listener.get("port") or 0) == listener_port
-        and listener.get("proxy") == group_name
         for listener in listeners
     )
-    return has_group and has_listener
+    return has_listener
 
 
 def _file_signature(path: Path) -> tuple[str, int, int]:
@@ -116,7 +110,7 @@ async def run_sync(
     profile_dir: str,
     controller: str,
     secret: str,
-    listener_port: int = 30000,
+    listener_port: int = 60000,
     group_name: str = "crawler-pool",
 ) -> dict:
     """同步主流程，返回结果摘要。"""
@@ -169,7 +163,7 @@ async def watch_sync(
     profile_dir: str,
     controller: str,
     secret: str,
-    listener_port: int = 30000,
+    listener_port: int = 60000,
     group_name: str = "crawler-pool",
     interval: float = 10.0,
     sync_on_start: bool = True,
