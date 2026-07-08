@@ -284,6 +284,11 @@
             >期刊数据</a
           >
           <a
+            href="/api-docs"
+            class="{% if request.url.path == '/api-docs' %}active{% endif %}"
+            >接口调试</a
+          >
+          <a
             href="/workers"
             class="{% if request.url.path == '/workers' %}active{% endif %}"
             >Worker管理</a

@@ -1,0 +1,329 @@
+{% extends "base.html" %} {% block title %}期刊查询调试 - LetPub爬虫{% endblock %}
+{% block content %}
+<style>
+  .debug-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin: 15px 0;
+  }
+  .debug-grid .form-group {
+    margin-bottom: 0;
+  }
+  .range-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .request-box {
+    background: #f8f9fa;
+    border: 1px solid #e6e8eb;
+    border-radius: 6px;
+    padding: 10px;
+    overflow-x: auto;
+    font-family: "Consolas", "Monaco", monospace;
+    font-size: 12px;
+  }
+  .result-wrap {
+    overflow-x: auto;
+  }
+  .json-box {
+    max-height: 320px;
+    overflow: auto;
+    white-space: pre;
+  }
+  .debug-actions {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .field-query-row {
+    display: grid;
+    grid-template-columns: minmax(170px, 1fr) minmax(180px, 1.4fr);
+    gap: 8px;
+  }
+  #query-typo-fuzzy {
+    width: auto;
+  }
+  @media (max-width: 720px) {
+    .field-query-row {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+
+<div class="card">
+  <div class="flex-between">
+    <h2>期刊查询调试</h2>
+    <code>GET /api/journals</code>
+  </div>
+
+  <form id="journal-api-debug-form">
+    <div class="debug-grid">
+      <div class="form-group">
+        <label for="query-name">期刊名模糊查询</label>
+        <input id="query-name" data-param="name" type="text" placeholder="Nature / Cell" />
+      </div>
+      <div class="form-group">
+        <label for="query-q">通用模糊查询</label>
+        <input id="query-q" data-param="q" type="text" placeholder="期刊名 / ISSN / ID" />
+      </div>
+      <div class="form-group">
+        <label for="query-issn">ISSN</label>
+        <input id="query-issn" data-param="issn" type="text" placeholder="0000-0000" />
+      </div>
+      <div class="form-group">
+        <label>影响因子区间</label>
+        <div class="range-row">
+          <input data-param="impact_factor_min" type="number" min="0" step="0.0001" placeholder="最小" />
+          <input data-param="impact_factor_max" type="number" min="0" step="0.0001" placeholder="最大" />
+        </div>
+      </div>
+      <div class="form-group">
+        <label>实时影响因子区间</label>
+        <div class="range-row">
+          <input data-param="impact_factor_realtime_min" type="number" min="0" step="0.0001" placeholder="最小" />
+          <input data-param="impact_factor_realtime_max" type="number" min="0" step="0.0001" placeholder="最大" />
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="query-jcr">JCR 分区</label>
+        <input id="query-jcr" data-param="jcr_partition" type="text" placeholder="Q1 / 学科" />
+      </div>
+      <div class="form-group">
+        <label for="query-cas">中科院分区</label>
+        <input id="query-cas" data-param="cas_partition" type="text" placeholder="一区 / 学科" />
+      </div>
+      <div class="form-group">
+        <label for="query-citescore">CiteScore</label>
+        <input id="query-citescore" data-param="citescore" type="text" placeholder="Q1 / 学科" />
+      </div>
+      <div class="form-group">
+        <label for="query-review-speed">审稿速度</label>
+        <input id="query-review-speed" data-param="review_speed" type="text" placeholder="1月 / weeks" />
+      </div>
+      <div class="form-group">
+        <label for="query-acceptance-rate">录用比例</label>
+        <input id="query-acceptance-rate" data-param="acceptance_rate" type="text" placeholder="较易 / 约" />
+      </div>
+      <div class="form-group">
+        <label for="query-self-citation-rate">自引率</label>
+        <input id="query-self-citation-rate" data-param="self_citation_rate" type="text" placeholder="%" />
+      </div>
+      <div class="form-group">
+        <label for="query-detail-text">详情文本</label>
+        <input id="query-detail-text" data-param="detail_text" type="text" placeholder="任意详情文本" />
+      </div>
+      <div class="form-group">
+        <label for="query-sort">排序</label>
+        <select id="query-sort" data-param="sort">
+          <option value="impact_factor">影响因子</option>
+          <option value="impact_factor_realtime">实时影响因子</option>
+          <option value="name">期刊名</option>
+          <option value="journal_id">期刊ID</option>
+          <option value="updated_at">更新时间</option>
+          <option value="created_at">创建时间</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="query-order">方向</label>
+        <select id="query-order" data-param="order">
+          <option value="desc">降序</option>
+          <option value="asc">升序</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="query-size">返回数量</label>
+        <input id="query-size" data-param="size" type="number" min="1" max="100" value="20" />
+      </div>
+      <div class="form-group">
+        <label for="query-typo-fuzzy">拼写容错</label>
+        <div class="flex">
+          <input id="query-typo-fuzzy" data-param="typo_fuzzy" type="checkbox" value="true" />
+          <input data-param="fuzzy_threshold" type="number" min="0.1" max="1" step="0.05" value="0.3" />
+        </div>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>其他详情字段模糊查询</label>
+      <div class="field-query-row">
+        <input id="detail-field" data-param="detail_field" type="text" placeholder="字段名" />
+        <input id="detail-value" data-param="detail_value" type="text" placeholder="字段值" />
+      </div>
+    </div>
+
+    <div class="debug-actions">
+      <button class="btn btn-primary btn-sm" type="submit">调用接口</button>
+      <button class="btn btn-sm" type="button" onclick="resetDebugForm()">重置</button>
+      <span id="debug-status" class="text-small text-muted"></span>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <h2>请求</h2>
+  <div id="request-url" class="request-box">/api/journals?page=1&amp;size=20</div>
+</div>
+
+<div class="card">
+  <div class="flex-between">
+    <h2>结果 <span id="result-total" class="text-small text-muted"></span></h2>
+    <button class="btn btn-sm" type="button" onclick="toggleJson()">JSON</button>
+  </div>
+  <div class="result-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>期刊ID</th>
+          <th>名称</th>
+          <th>ISSN</th>
+          <th>影响因子</th>
+          <th>实时影响因子</th>
+          <th>JCR</th>
+          <th>中科院</th>
+          <th>评论数</th>
+        </tr>
+      </thead>
+      <tbody id="debug-result-table">
+        <tr>
+          <td colspan="8" class="text-muted">等待调用</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <pre id="debug-json" class="json-box" style="display: none"></pre>
+</div>
+{% endblock %} {% block scripts %}
+<script>
+  const debugForm = document.getElementById("journal-api-debug-form");
+  const requestUrl = document.getElementById("request-url");
+  const statusText = document.getElementById("debug-status");
+  const resultTable = document.getElementById("debug-result-table");
+  const resultTotal = document.getElementById("result-total");
+  const jsonBox = document.getElementById("debug-json");
+
+  document.addEventListener("DOMContentLoaded", () => {
+    debugForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      callJournalQuery();
+    });
+    updateRequestUrl();
+    debugForm.querySelectorAll("[data-param]").forEach((element) => {
+      element.addEventListener("input", updateRequestUrl);
+      element.addEventListener("change", updateRequestUrl);
+    });
+  });
+
+  function buildParams() {
+    const params = new URLSearchParams({ page: "1" });
+    debugForm.querySelectorAll("[data-param]").forEach((element) => {
+      const param = element.dataset.param;
+      if (element.type === "checkbox") {
+        if (element.checked) params.set(param, element.value || "true");
+        return;
+      }
+      const value = element.value.trim();
+      if (!value) return;
+      if (param === "sort" && value === "impact_factor") return;
+      if (param === "order" && value === "desc") return;
+      if (param === "fuzzy_threshold" && value === "0.3") return;
+      params.set(param, value);
+    });
+    if (!params.has("size")) params.set("size", "20");
+    if (params.has("detail_field")) {
+      params.set("detail_op", params.has("detail_value") ? "contains" : "exists");
+    }
+    return params;
+  }
+
+  function updateRequestUrl() {
+    const params = buildParams();
+    requestUrl.textContent = `/api/journals?${params.toString()}`;
+  }
+
+  async function callJournalQuery() {
+    const params = buildParams();
+    const url = `/api/journals?${params.toString()}`;
+    requestUrl.textContent = url;
+    statusText.textContent = "调用中";
+    resultTable.innerHTML = `<tr><td colspan="8" class="text-muted">加载中</td></tr>`;
+
+    const response = await fetch(url);
+    const payload = await response.json().catch(() => ({ detail: "响应解析失败" }));
+    jsonBox.textContent = JSON.stringify(payload, null, 2);
+
+    if (!response.ok) {
+      statusText.textContent = "调用失败";
+      resultTotal.textContent = "";
+      resultTable.innerHTML = `<tr><td colspan="8" class="text-danger">${escapeHtml(payload.detail || "调用失败")}</td></tr>`;
+      return;
+    }
+
+    statusText.textContent = "调用完成";
+    resultTotal.textContent = `(共 ${payload.total} 条)`;
+    if (!payload.items.length) {
+      resultTable.innerHTML = `<tr><td colspan="8" class="text-muted">无匹配数据</td></tr>`;
+      return;
+    }
+
+    resultTable.innerHTML = payload.items.map(renderRow).join("");
+  }
+
+  function renderRow(journal) {
+    return `
+      <tr>
+        <td>${journal.journal_id}</td>
+        <td><a href="/journals/${journal.journal_id}/comments">${escapeHtml(truncate(journal.name, 64))}</a></td>
+        <td>${escapeHtml(journal.issn || "-")}</td>
+        <td>${formatNumber(journal.impact_factor)}</td>
+        <td>${formatNumber(journal.impact_factor_realtime)}</td>
+        <td>${escapeHtml(displayText(journal.jcr_partition_summary || journal.jcr_partition))}</td>
+        <td>${escapeHtml(displayText(journal.cas_partition_summary || journal.cas_partition))}</td>
+        <td>${journal.comment_count || 0}</td>
+      </tr>
+    `;
+  }
+
+  function resetDebugForm() {
+    debugForm.reset();
+    resultTotal.textContent = "";
+    statusText.textContent = "";
+    jsonBox.textContent = "";
+    jsonBox.style.display = "none";
+    resultTable.innerHTML = `<tr><td colspan="8" class="text-muted">等待调用</td></tr>`;
+    updateRequestUrl();
+  }
+
+  function toggleJson() {
+    jsonBox.style.display = jsonBox.style.display === "none" ? "block" : "none";
+  }
+
+  function displayText(value, limit = 46) {
+    if (!value) return "-";
+    const text = String(value).trim();
+    if (!text) return "-";
+    return truncate(text, limit);
+  }
+
+  function truncate(value, limit) {
+    const text = String(value || "");
+    return text.length > limit ? `${text.substring(0, limit)}...` : text;
+  }
+
+  function formatNumber(value) {
+    if (value === null || value === undefined || value === "") return "-";
+    return Number(value).toString();
+  }
+
+  function escapeHtml(value) {
+    return String(value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+</script>
+{% endblock %}

@@ -164,6 +164,12 @@ LOCAL_WORKER_CONCURRENCY=4
 LOCAL_WORKER_SCALE=1
 ```
 
+### 覆盖部署
+
+主节点部署采用覆盖现有 compose 服务的方式。部署前保留服务器上现有 `.env` 和 `POSTGRES_DATA_DIR`，新镜像或新配置通过 `docker compose up -d --build app worker` 重建容器并接管现有服务。
+
+不要在覆盖部署中删除 PostgreSQL 挂载目录，也不要执行 `docker compose down -v`。如果需要轮换数据库密码，先用数据库管理命令修改 PostgreSQL 用户密码，再同步更新 `.env` 中的 `POSTGRES_PASSWORD` 或 `DB_PASSWORD`，最后重新执行覆盖部署。
+
 本机 worker 在 `docker-compose.yml` 中使用 host 网络，可通过宿主机端口连接主节点服务：
 
 ```env

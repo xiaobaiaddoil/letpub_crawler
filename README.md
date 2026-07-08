@@ -39,6 +39,8 @@ cp .env.example .env
 /home/cc/database/letpub_crawler_v2/postgres
 ```
 
+覆盖部署已有主节点时，必须复用服务器上现有 `.env`。`docker compose up -d --build app worker` 会重建容器并接管现有服务，PostgreSQL 数据依赖 `POSTGRES_DATA_DIR` 持久化；不要执行会删除 volume 或挂载目录的命令。数据库密码需要轮换时，先在 PostgreSQL 内修改用户密码，再把 `.env` 中的 `POSTGRES_PASSWORD` 或 `DB_PASSWORD` 更新为新值后重新部署。
+
 启动主节点：
 
 ```bash
