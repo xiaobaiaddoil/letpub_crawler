@@ -20,7 +20,7 @@ def db():
 
 def _add(db, **kwargs) -> ProxyPool:
     defaults = dict(
-        ip="127.0.0.1", port=30000, protocol="http",
+        ip="127.0.0.1", port=60000, protocol="http",
         proxy_type="direct", source="clash",
         is_active=True, is_valid=True,
         success_count=0, fail_count=0, total_fail_count=0,
@@ -52,6 +52,16 @@ def test_proxy_failure_lowers_weight_without_immediate_disable(db):
     assert p.is_active is True
 
 
+def test_clash_proxy_failure_keeps_listener_valid_at_threshold(db):
+    p = _add(db, source="clash", fail_count=2, is_valid=True)
+    ProxyService(db).report_proxy_result(p.id, success=False)
+    db.refresh(p)
+    assert p.fail_count == 3
+    assert p.total_fail_count == 1
+    assert p.is_valid is True
+    assert p.is_active is True
+
+
 def test_proxy_failure_marks_invalid_at_threshold(db):
     p = _add(db, source="manual", fail_count=2, is_valid=True)
     ProxyService(db).report_proxy_result(p.id, success=False)
@@ -72,9 +82,53 @@ def test_proxy_success_reduces_fail_count(db):
 def test_proxy_weight_success_and_failure(db):
     service = ProxyService(db)
     good = _add(db, success_count=10, fail_count=0, total_fail_count=0)
-    bad = _add(db, port=30001, success_count=0, fail_count=2, total_fail_count=10)
+    bad = _add(db, port=60001, success_count=0, fail_count=2, total_fail_count=10)
 
     assert service._proxy_weight(good) > service._proxy_weight(bad)
+
+
+def test_proxy_stats_distinguish_total_active_and_assignable(db):
+    _add(db, port=60000, source="clash", is_active=True, is_valid=True, fail_count=5)
+    _add(db, port=60001, source="clash", is_active=False, is_valid=True, fail_count=0)
+    _add(db, port=30002, source="manual", is_active=True, is_valid=True, fail_count=3)
+    _add(db, port=30003, source="manual", is_active=True, is_valid=False, fail_count=3)
+
+    stats = ProxyService(db).get_stats()
+
+    assert stats["total"] == 4
+    assert stats["active"] == 3
+    assert stats["valid"] == 2
+    assert stats["assignable"] == 1
+    assert stats["inactive"] == 1
+    assert stats["active_invalid"] == 1
+
+
+@pytest.mark.asyncio
+async def test_excluding_all_available_proxies_does_not_reuse_one(db):
+    p = _add(db)
+
+    proxy = await ProxyService(db).get_random_proxy(exclude_ids=[p.id])
+
+    assert proxy is None
+
+
+@pytest.mark.asyncio
+async def test_clash_proxy_with_high_fail_count_remains_candidate(db):
+    p = _add(db, fail_count=10, total_fail_count=10, is_valid=True, source="clash")
+
+    proxy = await ProxyService(db).get_random_proxy()
+
+    assert proxy is not None
+    assert proxy.id == p.id
+
+
+@pytest.mark.asyncio
+async def test_stale_clash_listener_below_configured_port_is_not_candidate(db):
+    _add(db, port=30000, source="clash", is_active=True, is_valid=True)
+
+    proxy = await ProxyService(db).get_random_proxy()
+
+    assert proxy is None
 
 
 @pytest.mark.asyncio

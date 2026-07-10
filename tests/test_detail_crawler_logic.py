@@ -150,6 +150,34 @@ def test_extract_basic_info_from_http_html(crawler):
     assert result["CiteScore"]["tables"][0]["CiteScore"] == "9.80"
 
 
+@pytest.mark.asyncio
+async def test_http_detail_crawl_does_not_fetch_comments(monkeypatch):
+    crawler = DetailCrawler()
+
+    class Response:
+        status_code = 200
+        text = SAMPLE_DETAIL_HTML
+
+    async def fake_get_cookie(force_login=False):
+        return "PHPSESSID=test"
+
+    async def fake_fetch_detail(journal_id, url):
+        return Response()
+
+    async def fail_fetch_comments(*_args, **_kwargs):
+        raise AssertionError("detail crawl should not fetch comments")
+
+    monkeypatch.setattr(crawler, "get_cookie_for_http", fake_get_cookie)
+    monkeypatch.setattr(crawler, "_fetch_detail_response", fake_fetch_detail)
+    monkeypatch.setattr(crawler, "_fetch_comments_from_api", fail_fetch_comments)
+
+    detail = await crawler._crawl_with_http(123)
+
+    assert detail["journal_id"] == 123
+    assert detail["comments"] == []
+    assert "comment_count" not in detail["basic_info"]
+
+
 # ── _parse_comment_from_api ───────────────────────────────────────────────────
 
 SAMPLE_COMMENT_HTML = """<div>

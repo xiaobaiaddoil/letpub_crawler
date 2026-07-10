@@ -77,12 +77,37 @@ def test_crawler_fetch_mode_defaults_and_validates(tmp_path, monkeypatch):
     assert cfg.CRAWLER_FETCH_MODE == "browser"
 
 
+def test_direct_fallback_and_proxy_wait_config(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.config.CONFIG_DIR", tmp_path)
+    monkeypatch.delenv("CRAWLER_ALLOW_DIRECT_FALLBACK", raising=False)
+    monkeypatch.delenv("PROXY_UNAVAILABLE_SLEEP_SECONDS", raising=False)
+    write_yaml(tmp_path / "app.yaml", {
+        "crawler": {
+            "allow_direct_fallback": False,
+            "proxy_unavailable_sleep_seconds": 90,
+        },
+    })
+    write_yaml(tmp_path / "proxy.yaml", {})
+
+    cfg = Config()
+    assert cfg.CRAWLER_ALLOW_DIRECT_FALLBACK is False
+    assert cfg.PROXY_UNAVAILABLE_SLEEP_SECONDS == 90
+
+    monkeypatch.setenv("CRAWLER_ALLOW_DIRECT_FALLBACK", "true")
+    monkeypatch.setenv("PROXY_UNAVAILABLE_SLEEP_SECONDS", "15")
+    assert cfg.CRAWLER_ALLOW_DIRECT_FALLBACK is True
+    assert cfg.PROXY_UNAVAILABLE_SLEEP_SECONDS == 15
+
+
 def test_env_overrides_yaml(tmp_path, monkeypatch):
     monkeypatch.setattr("app.config.CONFIG_DIR", tmp_path)
     monkeypatch.setenv("RUN_MODE", "master")
     monkeypatch.setenv("CRAWLER_AUTO_START", "false")
     monkeypatch.setenv("DATABASE_URL", "postgresql://env_user:env_pass@db:5432/env_db")
     monkeypatch.setenv("PARALLEL_WORKERS", "7")
+    monkeypatch.setenv("COMMENT_PARALLEL_WORKERS", "2")
+    monkeypatch.setenv("COMMENT_DELAY_MIN", "2.5")
+    monkeypatch.setenv("COMMENT_DELAY_MAX", "6.5")
     monkeypatch.setenv("LETPUB_COOKIE", "a=b")
     write_yaml(tmp_path / "app.yaml", {
         "run_mode": "standalone",
@@ -104,4 +129,7 @@ def test_env_overrides_yaml(tmp_path, monkeypatch):
     assert cfg.CRAWLER_AUTO_START is False
     assert cfg.DATABASE_URL == "postgresql://env_user:env_pass@db:5432/env_db"
     assert cfg.PARALLEL_WORKERS == 7
+    assert cfg.COMMENT_PARALLEL_WORKERS == 2
+    assert cfg.COMMENT_DELAY_MIN == 2.5
+    assert cfg.COMMENT_DELAY_MAX == 6.5
     assert cfg.LETPUB_COOKIE == "a=b"

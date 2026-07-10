@@ -11,6 +11,7 @@ from app.database import SessionLocal
 from app.config import config
 from app.services.index_service import IndexService
 from app.services.metric_service import MetricService
+from app.services.detail_quality_service import DetailQualityService
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +58,26 @@ class CrawlerService:
     async def run(self):
         self._running = True
         n = config.PARALLEL_WORKERS
-        logger.info(f"爬虫服务启动 (worker: {self.worker_id})，消费者协程数: {n}")
+        comment_n = max(0, config.COMMENT_PARALLEL_WORKERS)
+        logger.info(
+            f"爬虫服务启动 (worker: {self.worker_id})，详情/列表消费者协程数: {n}，"
+            f"评论消费者协程数: {comment_n}"
+        )
 
-        consumer_tasks = [asyncio.create_task(self._consumer_loop(i)) for i in range(n)]
+        consumer_tasks = [
+            asyncio.create_task(self._consumer_loop(
+                i,
+                [TaskType.CATEGORY.value, TaskType.LIST.value, TaskType.DETAIL.value],
+            ))
+            for i in range(n)
+        ]
+        consumer_tasks.extend(
+            asyncio.create_task(self._consumer_loop(
+                i,
+                [TaskType.COMMENT.value],
+            ))
+            for i in range(comment_n)
+        )
         try:
             await asyncio.gather(*consumer_tasks)
         except asyncio.CancelledError:
@@ -72,14 +90,15 @@ class CrawlerService:
     # 消费者主循环                                                          #
     # ------------------------------------------------------------------ #
 
-    async def _consumer_loop(self, coroutine_id: int):
+    async def _consumer_loop(self, coroutine_id: int, task_types: list[str] | None = None):
+        task_types = task_types or [TaskType.CATEGORY.value, TaskType.LIST.value, TaskType.DETAIL.value]
         logger.info(f"[消费者-{coroutine_id}] 启动")
         while self._running:
             if self._paused:
                 await asyncio.sleep(1)
                 continue
 
-            task, task_type = await self._acquire_next_task()
+            task, task_type = await self._acquire_next_task(task_types)
 
             if task is None:
                 logger.debug(f"[消费者-{coroutine_id}] 无任务，等待 {NO_TASK_SLEEP_SECONDS}s")
@@ -94,19 +113,19 @@ class CrawlerService:
     # 任务获取                                                              #
     # ------------------------------------------------------------------ #
 
-    async def _acquire_next_task(self):
-        """按优先级尝试获取一个任务：CATEGORY → LIST → DETAIL。
+    async def _acquire_next_task(self, task_types: list[str] | None = None):
+        """按优先级尝试获取一个任务。
 
         返回 (task, task_type) 或 (None, None)。
         """
+        task_types = task_types or [TaskType.CATEGORY.value, TaskType.LIST.value, TaskType.DETAIL.value]
         db = SessionLocal()
         try:
             tm = TaskManager(db, self.worker_id)
-            for task_type in [TaskType.CATEGORY.value, TaskType.LIST.value, TaskType.DETAIL.value]:
+            for task_type in task_types:
                 tasks = tm.acquire_tasks(task_type, limit=1)
                 if tasks:
                     return tasks[0], task_type
-            self._maybe_retry_failed(db, tm)
             return None, None
         except Exception as e:
             logger.error(f"获取任务失败: {e}")
@@ -114,14 +133,6 @@ class CrawlerService:
             return None, None
         finally:
             db.close()
-
-    def _maybe_retry_failed(self, db, tm: TaskManager):
-        try:
-            failed_tasks = tm.get_failed_tasks(limit=3)
-            for task in failed_tasks:
-                tm.retry_task(task)
-        except Exception as e:
-            logger.warning(f"重置失败任务出错: {e}")
 
     # ------------------------------------------------------------------ #
     # 任务执行                                                              #
@@ -134,6 +145,8 @@ class CrawlerService:
             await self._execute_list_task(task, coroutine_id)
         elif task_type == TaskType.DETAIL.value:
             await self._execute_detail_task(task, coroutine_id)
+        elif task_type == TaskType.COMMENT.value:
+            await self._execute_comment_task(task, coroutine_id)
 
     async def _execute_category_task(self, task, coroutine_id: int):
         from app.crawler.category_crawler import CategoryCrawler
@@ -287,7 +300,22 @@ class CrawlerService:
 
                 journal = db.query(Journal).filter(Journal.journal_id == journal_id).first()
                 if journal:
-                    basic_info = detail.get("basic_info", {})
+                    fresh_basic_info = detail.get("basic_info", {})
+                    quality_service = DetailQualityService(db)
+                    quality = quality_service.audit_data(journal_id, fresh_basic_info)
+                    if not quality.ok:
+                        quality_service.record_result(journal_id, quality)
+                        db.commit()
+                        raise DataValidationError(
+                            f"期刊 {journal_id} 详情质量检查未通过: {','.join(quality.hard_reasons)}",
+                            missing_fields=quality.missing_required,
+                            extracted_fields=quality.field_count,
+                        )
+
+                    basic_info = {
+                        **(journal.detail_data or {}),
+                        **fresh_basic_info,
+                    }
                     journal.issn = basic_info.get("issn", journal.issn)
                     journal.eissn = basic_info.get("E-ISSN")
                     journal.impact_factor = basic_info.get("impact_factor", journal.impact_factor)
@@ -302,31 +330,9 @@ class CrawlerService:
                     journal.detail_data = basic_info
                     journal.detail_crawled = True
 
-                    seen_comment_ids = set()
-                    comments_to_insert = []
-                    for c_data in detail.get("comments", []):
-                        comment_id = c_data.get("comment_id")
-                        if not comment_id or comment_id in seen_comment_ids:
-                            continue
-                        seen_comment_ids.add(comment_id)
-                        comments_to_insert.append({
-                            "journal_id": journal.journal_id,
-                            "comment_id": comment_id,
-                            "content": c_data.get("content"),
-                            "author": c_data.get("author"),
-                            "rating": c_data.get("rating"),
-                            "submit_experience": c_data.get("submit_experience"),
-                            "comment_time": c_data.get("comment_time")
-                        })
-
-                    if comments_to_insert:
-                        from sqlalchemy.dialects.postgresql import insert
-                        stmt = insert(Comment).values(comments_to_insert)
-                        stmt = stmt.on_conflict_do_nothing(index_elements=['comment_id'])
-                        db.execute(stmt)
-
-                    journal.comments_crawled = True
+                    quality_service.mark_detail_problems_resolved(journal_id)
                     MetricService(db).record_snapshot(journal, basic_info, task_id=task.id)
+                    tm.create_comment_task(journal_id, journal.category_id)
                     db.commit()
 
             tm.complete_task(task)
@@ -337,6 +343,65 @@ class CrawlerService:
             error_msg = f"数据校验失败: {str(e)}, 提取字段数: {e.extracted_fields}, 缺失字段: {e.missing_fields}"
             logger.warning(f"{tag} 校验失败 task={task.id}: {error_msg}")
             TaskManager(db, self.worker_id).fail_task(task, error_msg)
+
+        except Exception as e:
+            db.rollback()
+            logger.exception(f"{tag} 失败 task={task.id} journal_id={journal_id}")
+            TaskManager(db, self.worker_id).fail_task(task, str(e))
+        finally:
+            db.close()
+
+    async def _execute_comment_task(self, task, coroutine_id: int):
+        from app.crawler.detail_crawler import DetailCrawler
+
+        journal_id = int(task.target_id)
+        tag = f"[消费者-{coroutine_id}][评论]"
+        logger.info(f"{tag} 开始 task={task.id} journal_id={journal_id}")
+
+        db = SessionLocal()
+        try:
+            tm = TaskManager(db, self.worker_id)
+            tm.renew_task_lock(task)
+
+            async with DetailCrawler() as crawler:
+                comments, comment_info = await crawler.crawl_comments_only(journal_id)
+
+            journal = db.query(Journal).filter(Journal.journal_id == journal_id).first()
+            if journal:
+                seen_comment_ids = set()
+                comments_to_insert = []
+                for c_data in comments:
+                    comment_id = c_data.get("comment_id")
+                    if not comment_id or comment_id in seen_comment_ids:
+                        continue
+                    seen_comment_ids.add(comment_id)
+                    comments_to_insert.append({
+                        "journal_id": journal.journal_id,
+                        "comment_id": comment_id,
+                        "content": c_data.get("content"),
+                        "author": c_data.get("author"),
+                        "rating": c_data.get("rating"),
+                        "submit_experience": c_data.get("submit_experience"),
+                        "comment_time": c_data.get("comment_time")
+                    })
+
+                if comments_to_insert:
+                    from sqlalchemy.dialects.postgresql import insert
+                    stmt = insert(Comment).values(comments_to_insert)
+                    stmt = stmt.on_conflict_do_nothing(index_elements=['comment_id'])
+                    db.execute(stmt)
+
+                basic_info = dict(journal.detail_data or {})
+                basic_info["comment_count"] = comment_info.get("total_count", 0)
+                basic_info["comment_pages"] = comment_info.get("total_pages", 0)
+                basic_info["crawled_comment_count"] = comment_info.get("crawled_count", 0)
+                journal.detail_data = basic_info
+                journal.comments_crawled = True
+                MetricService(db).record_snapshot(journal, basic_info, task_id=task.id)
+                db.commit()
+
+            tm.complete_task(task)
+            logger.info(f"{tag} 完成 task={task.id} journal_id={journal_id}")
 
         except Exception as e:
             db.rollback()

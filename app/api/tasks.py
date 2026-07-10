@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from datetime import datetime, timedelta, timezone
 from app.database import get_db
 from app.services.task_manager import TaskManager
+from app.services.detail_quality_service import DetailQualityService
 from app.models.task import CrawlTask, TaskStatus, TaskType
 from app.models.journal import Journal
 from app.models.comment import Comment
@@ -45,6 +46,13 @@ class TaskListResponse(BaseModel):
 
 class FullRefreshRequest(BaseModel):
     limit: Optional[int] = None
+
+
+class DetailQualityRebuildRequest(BaseModel):
+    journal_ids: Optional[List[int]] = None
+    dry_run: bool = True
+    limit: Optional[int] = None
+    include_comments: bool = False
 
 @router.get("/", response_model=TaskListResponse)
 def list_tasks(
@@ -179,6 +187,41 @@ def create_full_detail_refresh_tasks(
     limit = request.limit if request else None
     count = TaskManager(db).create_full_detail_refresh_tasks(limit=limit)
     return {"message": f"已创建/刷新 {count} 个详情更新任务", "created_count": count}
+
+
+@router.get("/detail-quality/check")
+def check_detail_quality(
+    limit: Optional[int] = Query(None, ge=1),
+    include_ok: bool = Query(False),
+    record: bool = Query(False, description="是否把问题写入 problem_tasks"),
+    db: Session = Depends(get_db),
+):
+    """检查已完成详情数据质量，默认只返回 warning/bad。"""
+    return DetailQualityService(db).audit_completed(
+        limit=limit,
+        include_ok=include_ok,
+        record=record,
+    )
+
+
+@router.post("/detail-quality/rebuild")
+def rebuild_detail_quality_tasks(
+    request: DetailQualityRebuildRequest,
+    db: Session = Depends(get_db),
+):
+    """按详情质量检查结果或指定 journal_ids 重建详情任务。"""
+    service = DetailQualityService(db)
+    if request.journal_ids:
+        return service.rebuild_by_journal_ids(
+            request.journal_ids,
+            dry_run=request.dry_run,
+            include_comments=request.include_comments,
+        )
+    return service.rebuild_failed_audit(
+        dry_run=request.dry_run,
+        limit=request.limit,
+        include_comments=request.include_comments,
+    )
 
 @router.post("/{task_id}/re-crawl")
 def re_crawl_task(task_id: int, db: Session = Depends(get_db)):
@@ -428,7 +471,7 @@ def create_comment_update_tasks(
         journal = db.query(Journal).filter(Journal.journal_id == jid).first()
         if journal:
             journal.comments_crawled = False
-            task_manager.reset_or_create_detail_task(jid, journal.category_id)
+            task_manager.create_comment_task(jid, journal.category_id, refresh_completed=True)
             
             created += 1
     
@@ -464,6 +507,7 @@ def create_missing_info_update_tasks(db: Session = Depends(get_db)):
             journal.detail_crawled = False
             journal.comments_crawled = False
             task_manager.reset_or_create_detail_task(jid, journal.category_id)
+            task_manager.create_comment_task(jid, journal.category_id, refresh_completed=True)
             
             created += 1
     
@@ -493,6 +537,7 @@ def create_outdated_update_tasks(
         journal.detail_crawled = False
         journal.comments_crawled = False
         task_manager.reset_or_create_detail_task(journal.journal_id, journal.category_id)
+        task_manager.create_comment_task(journal.journal_id, journal.category_id, refresh_completed=True)
         
         created += 1
     
@@ -519,6 +564,7 @@ def reset_tasks_by_journal(
             journal.detail_crawled = False
             journal.comments_crawled = False
             task_manager.reset_or_create_detail_task(jid, journal.category_id)
+            task_manager.create_comment_task(jid, journal.category_id, refresh_completed=True)
             reset_count += 1
     
     db.commit()
@@ -541,4 +587,5 @@ def reset_task_by_single_journal(
     
     task_manager = TaskManager(db)
     task = task_manager.reset_or_create_detail_task(journal_id, journal.category_id)
+    task_manager.create_comment_task(journal_id, journal.category_id, refresh_completed=True)
     return {"message": f"期刊 {journal_id} 任务已重置", "task_id": task.id}

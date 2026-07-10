@@ -39,7 +39,7 @@ class DataValidationError(Exception):
 
 
 class DetailCrawler(BaseCrawler):
-    """详情页爬虫 - 爬取期刊详情和评论"""
+    """详情页爬虫；评论 API 由独立 comment 任务调用。"""
 
     # 必须存在的核心字段（至少需要其中一个）
     REQUIRED_FIELDS = ['期刊名字', 'issn', '期刊ISSN']
@@ -302,15 +302,15 @@ class DetailCrawler(BaseCrawler):
         """爬取期刊详情
 
         流程：
-        1. 用 HTTP 获取详情页 HTML 并解析基本信息表格
-        2. 获取/刷新登录 Cookie，用同一 HTTP 会话爬取评论 API
+        1. 建立登录会话
+        2. 用 HTTP 获取详情页 HTML 并解析基本信息表格
 
         Args:
             journal_id: 期刊ID
             validate: 是否校验数据完整性，默认为True
 
         Returns:
-            包含basic_info和comments的字典
+            包含 basic_info 的字典，comments 保留为空列表以兼容旧调用方
 
         Raises:
             DataValidationError: 当validate=True且数据校验失败时抛出
@@ -352,22 +352,6 @@ class DetailCrawler(BaseCrawler):
         if validate:
             self._validate_basic_info(detail["basic_info"], journal_id)
 
-        if not cookie_value:
-            logger.warning(f"[评论] 期刊 {journal_id} 无可用 Cookie，跳过评论爬取")
-            detail["basic_info"]["comment_count"] = 0
-            detail["basic_info"]["comment_pages"] = 0
-            detail["basic_info"]["crawled_comment_count"] = 0
-            return detail
-
-        # 通过API提取评论（复用当前代理，带 Cookie）
-        comments, comment_info = await self._fetch_comments_from_api(journal_id, cookie_value)
-        detail["comments"] = comments
-
-        # 将评论数量信息存入 basic_info
-        detail["basic_info"]["comment_count"] = comment_info.get("total_count", 0)
-        detail["basic_info"]["comment_pages"] = comment_info.get("total_pages", 0)
-        detail["basic_info"]["crawled_comment_count"] = comment_info.get("crawled_count", 0)
-
         return detail
 
     async def _crawl_with_browser(self, journal_id: int, validate: bool = True) -> Dict:
@@ -406,19 +390,6 @@ class DetailCrawler(BaseCrawler):
 
         if validate:
             self._validate_basic_info(detail["basic_info"], journal_id)
-
-        if not cookie_value:
-            logger.warning(f"[评论] 期刊 {journal_id} 无可用 Cookie，跳过评论爬取")
-            detail["basic_info"]["comment_count"] = 0
-            detail["basic_info"]["comment_pages"] = 0
-            detail["basic_info"]["crawled_comment_count"] = 0
-            return detail
-
-        comments, comment_info = await self._fetch_comments_from_api(journal_id, cookie_value)
-        detail["comments"] = comments
-        detail["basic_info"]["comment_count"] = comment_info.get("total_count", 0)
-        detail["basic_info"]["comment_pages"] = comment_info.get("total_pages", 0)
-        detail["basic_info"]["crawled_comment_count"] = comment_info.get("crawled_count", 0)
 
         return detail
 
@@ -1049,6 +1020,7 @@ class DetailCrawler(BaseCrawler):
                         break
 
                     page += 1
+                    await self.random_comment_delay()
 
                 except json.JSONDecodeError as e:
                     logger.error(f"解析JSON失败: {e}")
@@ -1139,6 +1111,16 @@ class DetailCrawler(BaseCrawler):
                 f"{self._format_exception(e)}"
             )
             return None
+
+    async def random_comment_delay(self):
+        delay = config.COMMENT_DELAY_MIN
+        if config.COMMENT_DELAY_MAX > config.COMMENT_DELAY_MIN:
+            delay = config.COMMENT_DELAY_MIN + (
+                config.COMMENT_DELAY_MAX - config.COMMENT_DELAY_MIN
+            ) * (uuid.uuid4().int % 10_000) / 10_000
+        if delay > 0:
+            logger.debug(f"[评论限速] 等待 {delay:.2f}s 后继续请求评论 API")
+            await asyncio.sleep(delay)
 
     def _parse_comment_from_api(self, journal_id:str,item: Dict) -> Optional[Dict]:
         """解析API返回的单条评论数据"""
@@ -1436,12 +1418,19 @@ class DetailCrawler(BaseCrawler):
 
         return None
 
-    async def crawl_comments_only(self, journal_id: int) -> List[Dict]:
-        """只爬取评论（用于增量更新）"""
-        url = self._build_detail_url(journal_id)
+    async def crawl_comments_only(self, journal_id: int) -> tuple[List[Dict], Dict]:
+        """只爬取评论（用于独立评论任务）。"""
+        cookie_value = await self.get_cookie_for_http()
+        if not cookie_value:
+            logger.warning(f"[评论] 期刊 {journal_id} 无可用 Cookie，跳过评论爬取")
+            raise Exception(f"期刊 {journal_id} 评论爬取无可用 Cookie")
 
-        success = await self.goto(url)
-        if not success:
-            return []
-
-        return await self._extract_comments()
+        comments, comment_info = await self._fetch_comments_from_api(journal_id, cookie_value)
+        if (
+            not comments
+            and not comment_info.get("total_count")
+            and not comment_info.get("total_pages")
+            and not comment_info.get("crawled_count")
+        ):
+            raise Exception(f"期刊 {journal_id} 评论 API 未返回有效数据")
+        return comments, comment_info

@@ -31,11 +31,16 @@ crawler:
   # http: 默认，使用登录会话 + HTTP/API 请求，速度更快
   # browser: 临时回退到 Playwright 浏览器解析
   fetch_mode: http
-  delay_min: 3 # 请求最小延迟（秒）
-  delay_max: 8 # 请求最大延迟（秒）
+  allow_direct_fallback: false # 代理不可用时是否允许直连；生产建议 false
+  proxy_unavailable_sleep_seconds: 60 # 代理池无可用代理时释放任务并休眠等待
+  delay_min: 1 # HTTP 页面请求最小延迟（秒）
+  delay_max: 3 # HTTP 页面请求最大延迟（秒）
   max_retry: 3 # 任务最大重试次数
   batch_size: 5 # 已废弃，消费者模式每次拉取1个任务，保留仅为配置兼容
   parallel_workers: 4 # 每节点消费者协程数（同时爬取的任务数）
+  comment_parallel_workers: 1 # 评论任务专用消费者数，避免大评论期刊占用详情抓取
+  comment_delay_min: 0.5 # 评论 API 每页请求最小延迟（秒）
+  comment_delay_max: 1.5 # 评论 API 每页请求最大延迟（秒）
 
 # 分布式配置
 distributed:

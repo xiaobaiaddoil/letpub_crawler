@@ -75,6 +75,7 @@ worker 默认并发数为 `4`，可通过环境变量调整：
 ```env
 PARALLEL_WORKERS=4
 LOCAL_WORKER_CONCURRENCY=4
+COMMENT_PARALLEL_WORKERS=1
 ```
 
 默认爬取方式为 HTTP/API，不安装浏览器，构建更轻：
@@ -82,9 +83,15 @@ LOCAL_WORKER_CONCURRENCY=4
 ```env
 CRAWLER_FETCH_MODE=http
 WORKER_BUILD_TARGET=worker-http
-CRAWL_DELAY_MIN=10
-CRAWL_DELAY_MAX=20
+CRAWLER_ALLOW_DIRECT_FALLBACK=false
+PROXY_UNAVAILABLE_SLEEP_SECONDS=60
+CRAWL_DELAY_MIN=1
+CRAWL_DELAY_MAX=3
+COMMENT_DELAY_MIN=0.5
+COMMENT_DELAY_MAX=1.5
 ```
+
+详情页和评论页现在拆成独立任务。`PARALLEL_WORKERS` 处理分类、列表和详情页；`COMMENT_PARALLEL_WORKERS` 只处理评论 API。评论请求不会占用详情页 consumer，并且默认按 0.5~1.5 秒/页降频，可通过 `COMMENT_DELAY_MIN/MAX` 单独调整。
 
 若 HTTP/API 方式临时不可用，可保留旧浏览器方式：
 
@@ -139,6 +146,8 @@ http://username:password@host:port
 - 失败：`fail_count/total_fail_count + 1`，后续权重降低。
 - 连续失败达到阈值后标记为无效；未达到阈值只降权，不立即下架。
 
+`/proxies` 面板中的“总记录”是代理表历史记录数，包含已禁用的旧 Clash listener；worker 实际只会从“可分配”代理中取值，即启用、有效且符合当前分配策略的代理。
+
 worker 发生 LetPub 限流时会记录代理上下文，例如：
 
 ```text
@@ -146,7 +155,7 @@ worker 发生 LetPub 限流时会记录代理上下文，例如：
 [use_proxy=true proxy=127.0.0.1:60012 id=531 source=clash proxy_type=direct area=local-clash remark=...egress_ip=1.2.3.4]
 ```
 
-若代理请求失败，worker 会先上报失败并排除该代理，再从代理池换另一个代理重试；只有代理池拿不到可用代理时才会直连。
+若代理请求失败，worker 会先上报失败并排除该代理，再从代理池换另一个代理重试。默认 `CRAWLER_ALLOW_DIRECT_FALLBACK=false`，代理池拿不到可用代理时会释放已领取任务并休眠等待，不会继续直连打 LetPub；确需临时直连时再显式改为 `true`。调度器会优先消费新任务；当同类型没有 pending 任务时，会继续调度 `retry_count < max_retry` 的失败任务。
 
 本机 Clash 接入采用多 listener，每个 listener 固定绑定一个 Clash 节点：
 

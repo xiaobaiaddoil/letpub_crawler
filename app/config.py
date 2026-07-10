@@ -36,6 +36,10 @@ def env_int(name: str, default: Any = 0) -> int:
     return int(env_value(name, default=default))
 
 
+def env_float(name: str, default: Any = 0.0) -> float:
+    return float(env_value(name, default=default))
+
+
 def load_yaml_config(filename: str) -> dict:
     """加载 YAML 配置文件"""
     config_path = CONFIG_DIR / filename
@@ -104,11 +108,11 @@ class Config:
     
     @property
     def CRAWL_DELAY_MIN(self) -> int:
-        return env_int("CRAWL_DELAY_MIN", default=get_nested(self._app_config, "crawler", "delay_min", default=3))
+        return env_int("CRAWL_DELAY_MIN", default=get_nested(self._app_config, "crawler", "delay_min", default=1))
     
     @property
     def CRAWL_DELAY_MAX(self) -> int:
-        return env_int("CRAWL_DELAY_MAX", default=get_nested(self._app_config, "crawler", "delay_max", default=8))
+        return env_int("CRAWL_DELAY_MAX", default=get_nested(self._app_config, "crawler", "delay_max", default=3))
 
     @property
     def CRAWLER_FETCH_MODE(self) -> str:
@@ -119,6 +123,20 @@ class Config:
         if mode not in {"http", "browser"}:
             return "http"
         return mode
+
+    @property
+    def CRAWLER_ALLOW_DIRECT_FALLBACK(self) -> bool:
+        return env_bool(
+            "CRAWLER_ALLOW_DIRECT_FALLBACK",
+            default=get_nested(self._app_config, "crawler", "allow_direct_fallback", default=False),
+        )
+
+    @property
+    def PROXY_UNAVAILABLE_SLEEP_SECONDS(self) -> int:
+        return env_int(
+            "PROXY_UNAVAILABLE_SLEEP_SECONDS",
+            default=get_nested(self._app_config, "crawler", "proxy_unavailable_sleep_seconds", default=60),
+        )
     
     @property
     def MAX_RETRY(self) -> int:
@@ -132,6 +150,29 @@ class Config:
     @property
     def PARALLEL_WORKERS(self) -> int:
         return env_int("PARALLEL_WORKERS", default=get_nested(self._app_config, "crawler", "parallel_workers", default=4))
+
+    @property
+    def COMMENT_PARALLEL_WORKERS(self) -> int:
+        return env_int(
+            "COMMENT_PARALLEL_WORKERS",
+            default=get_nested(self._app_config, "crawler", "comment_parallel_workers", default=1),
+        )
+
+    @property
+    def COMMENT_DELAY_MIN(self) -> float:
+        return env_float(
+            "COMMENT_DELAY_MIN",
+            default=get_nested(self._app_config, "crawler", "comment_delay_min", default=0.5),
+        )
+
+    @property
+    def COMMENT_DELAY_MAX(self) -> float:
+        min_delay = self.COMMENT_DELAY_MIN
+        configured = env_float(
+            "COMMENT_DELAY_MAX",
+            default=get_nested(self._app_config, "crawler", "comment_delay_max", default=1.5),
+        )
+        return max(min_delay, configured)
     
     @property
     def WORKER_ID(self) -> str:

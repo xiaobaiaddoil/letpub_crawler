@@ -24,6 +24,10 @@ _LETPUB_PAGE_REQUEST_LOCK = asyncio.Lock()
 _LAST_LETPUB_PAGE_REQUEST_AT = 0.0
 
 
+class ProxyUnavailableError(RuntimeError):
+    """Raised when proxy mode is required but no usable proxy can be assigned."""
+
+
 # 反检测注入脚本：消除 Playwright/Chromium 自动化特征，使指纹接近真实浏览器
 _STEALTH_INIT_SCRIPT = """
 // navigator.webdriver
@@ -101,15 +105,24 @@ class BaseCrawler(ABC):
         if proxy_info:
             logger.info(f"[HTTP代理] 复用当前代理: {proxy_display(proxy_info)}")
         elif use_proxy:
-            proxy_info = await self._get_proxy_from_pool()
-            if proxy_info and not await self._probe_proxy(proxy_info):
+            for _ in range(4):
+                proxy_info = await self._get_proxy_from_pool()
+                if not proxy_info:
+                    break
+                if await self._probe_proxy(proxy_info):
+                    break
+                failed_proxy_id = proxy_info.get("id")
                 await self.report_proxy_result(success=False)
+                if failed_proxy_id:
+                    self._proxy_exclude_ids.add(int(failed_proxy_id))
                 self._current_proxy_info = None
                 proxy_info = None
 
             if proxy_info:
                 logger.info(f"[HTTP代理] 使用: {proxy_display(proxy_info)}")
             else:
+                if not config.CRAWLER_ALLOW_DIRECT_FALLBACK:
+                    raise ProxyUnavailableError("[HTTP代理] 无可用代理，已暂停直连回退")
                 self._using_direct = True
                 logger.warning("[HTTP代理] 无可用代理，使用直连")
         else:
@@ -182,10 +195,11 @@ class BaseCrawler(ABC):
         for attempt in range(1, max_attempts + 1):
             await self.ensure_http_client()
             proxy_info = self.get_proxy_display()
+            proxy_context = self.get_proxy_context_for_log()
             try:
                 response = await self.http_client.request(method, url, **kwargs)
                 logger.debug(
-                    f"[HTTP] {method.upper()} {url} [代理: {proxy_info}] -> {response.status_code}"
+                    f"[HTTP] {method.upper()} {url} [{proxy_context}] -> {response.status_code}"
                 )
                 return response
             except Exception as exc:
@@ -196,7 +210,7 @@ class BaseCrawler(ABC):
                     logger.warning(
                         f"[HTTP代理] 请求失败，准备切换代理重试 "
                         f"({attempt}/{max_attempts}) {method.upper()} {url} "
-                        f"[代理: {proxy_info}] 错误: {error_text}"
+                        f"[{proxy_context}] 错误: {error_text}"
                     )
                     await self.report_proxy_result(success=False)
                     if failed_proxy_id:
@@ -205,11 +219,13 @@ class BaseCrawler(ABC):
                     self._current_proxy_info = None
                     await self.init_http(use_proxy=True)
                     if self._using_direct:
+                        if not config.CRAWLER_ALLOW_DIRECT_FALLBACK:
+                            raise ProxyUnavailableError("[HTTP代理] 代理池无可用代理，已暂停直连回退")
                         logger.warning("[HTTP代理] 代理池无可用代理，后续请求将使用直连")
                     continue
 
                 logger.error(
-                    f"[HTTP] 请求失败: {method.upper()} {url} [代理: {proxy_info}], "
+                    f"[HTTP] 请求失败: {method.upper()} {url} [{proxy_context}], "
                     f"尝试={attempt}/{max_attempts}, 错误: {error_text}"
                 )
                 raise
@@ -458,7 +474,7 @@ class BaseCrawler(ABC):
             await writer.wait_closed()
             return True
         except Exception as exc:
-            logger.warning(f"[代理] {display} 不可连接，跳过代理改用直连: {exc}")
+            logger.warning(f"[代理] {display} 不可连接，跳过该代理: {exc}")
             return False
 
     async def report_proxy_result(self, success: bool):
@@ -480,7 +496,7 @@ class BaseCrawler(ABC):
                 if success:
                     logger.debug(f"[代理] 报告成功: {proxy_addr}")
                 else:
-                    logger.warning(f"[代理] 报告失败: {proxy_addr}")
+                    logger.warning(f"[代理] 报告失败: {self.get_proxy_context_for_log()}")
         except Exception as e:
             logger.warning(f"[代理] 报告结果失败: {e}")
 
@@ -519,9 +535,16 @@ class BaseCrawler(ABC):
         self._using_direct = False
 
         if use_proxy:
-            proxy_info = await self._get_proxy_from_pool()
-            if proxy_info and not await self._probe_proxy(proxy_info):
+            for _ in range(4):
+                proxy_info = await self._get_proxy_from_pool()
+                if not proxy_info:
+                    break
+                if await self._probe_proxy(proxy_info):
+                    break
+                failed_proxy_id = proxy_info.get("id")
                 await self.report_proxy_result(success=False)
+                if failed_proxy_id:
+                    self._proxy_exclude_ids.add(int(failed_proxy_id))
                 self._current_proxy_info = None
                 proxy_info = None
 
@@ -539,7 +562,8 @@ class BaseCrawler(ABC):
                     # 白名单模式
                     logger.info(f"[代理] 使用代理(白名单): {display}")
             else:
-                # 无可用代理，使用直连
+                if not config.CRAWLER_ALLOW_DIRECT_FALLBACK:
+                    raise ProxyUnavailableError("[代理] 无可用代理，已暂停直连回退")
                 self._using_direct = True
                 logger.warning("[代理] 无可用代理，使用直连")
         else:
@@ -793,8 +817,13 @@ class BaseCrawler(ABC):
         except Exception as e:
             logger.error(f"访问页面失败: {url} [代理: {proxy_info}], 错误: {e}")
 
-            # 如果使用代理失败，尝试切换直连重试
+            # 如果使用代理失败，按配置决定是否切换直连重试
             if self._current_proxy_info and not self._using_direct:
+                if not config.CRAWLER_ALLOW_DIRECT_FALLBACK:
+                    logger.warning(f"[代理] {proxy_info} 失败，直连回退已禁用")
+                    await self.report_proxy_result(success=False)
+                    return False
+
                 logger.warning(f"[代理] {proxy_info} 失败，切换直连重试...")
                 await self.report_proxy_result(success=False)
 

@@ -17,6 +17,7 @@ import sys
 import os
 import argparse
 import asyncio
+import contextlib
 import logging
 import socket
 import json
@@ -33,16 +34,20 @@ from app.models.worker import Worker, WorkerStatus
 from app.models.task import CrawlTask, TaskType, TaskStatus
 from app.services.task_manager import TaskManager, generate_worker_id
 from app.services.problem_service import ProblemService
+from app.services.detail_quality_service import DetailQualityService
 from app.services.metric_service import MetricService
 from app.services.index_service import IndexService
+from app.crawler.base import ProxyUnavailableError
 from app.crawler.category_crawler import CategoryCrawler
 from app.crawler.list_crawler import ListCrawler
 from app.crawler.detail_crawler import DetailCrawler
+from app.crawler.detail_crawler import DataValidationError
 
 _CRAWLER_CLASS = {
     TaskType.CATEGORY.value: CategoryCrawler,
     TaskType.LIST.value: ListCrawler,
     TaskType.DETAIL.value: DetailCrawler,
+    TaskType.COMMENT.value: DetailCrawler,
 }
 
 # 初始化日志
@@ -93,7 +98,7 @@ class DistributedWorker:
         self._running = False
         self._paused = False
         self._proxy_assignment_lock = asyncio.Lock()
-        self._consumer_proxy_ids: dict[int, int] = {}
+        self._consumer_proxy_ids: dict[str, int] = {}
 
         self.failed_html_dir = Path("logs/failed_html")
         self.failed_html_dir.mkdir(parents=True, exist_ok=True)
@@ -152,6 +157,27 @@ class DistributedWorker:
             logger.warning(f"[直连] 请求失败，休眠 {self.DIRECT_FAIL_SLEEP_SECONDS} 秒...")
             await asyncio.sleep(self.DIRECT_FAIL_SLEEP_SECONDS)
             logger.info("[直连] 休眠结束，继续工作")
+
+    async def _handle_proxy_unavailable(self, task, coroutine_id: int, error: Exception):
+        """Release the task without counting a failure when no proxy can be assigned."""
+        db = SessionLocal()
+        try:
+            error_msg = str(error) or type(error).__name__
+            TaskManager(db, self.worker_id).release_task(task, error_msg)
+            logger.warning(
+                f"[消费者-{coroutine_id}] 代理不可用，任务退回等待 task={task.id}: {error_msg}"
+            )
+        except Exception as release_error:
+            db.rollback()
+            logger.error(
+                f"[消费者-{coroutine_id}] 释放代理不可用任务失败 task={task.id}: {release_error}"
+            )
+        finally:
+            db.close()
+
+        sleep_seconds = max(1, config.PROXY_UNAVAILABLE_SLEEP_SECONDS)
+        logger.warning(f"[代理] 无可用代理，消费者休眠 {sleep_seconds} 秒后重试")
+        await asyncio.sleep(sleep_seconds)
 
     async def register(self):
         db = SessionLocal()
@@ -238,25 +264,98 @@ class DistributedWorker:
             await self.heartbeat()
             await asyncio.sleep(config.HEARTBEAT_INTERVAL)
 
+    def _task_lock_renew_interval(self) -> int:
+        timeout = max(1, config.TASK_LOCK_TIMEOUT)
+        return max(1, min(60, timeout // 3 or 1))
+
+    def _renew_task_or_skip(self, tm: TaskManager, task: CrawlTask, tag: str) -> bool:
+        if tm.renew_task_lock(task):
+            return True
+        logger.warning(f"{tag} 任务锁已失效，跳过后续写库 task={task.id}")
+        return False
+
+    @staticmethod
+    def _format_elapsed(value) -> str:
+        if not value:
+            return "unknown"
+        if value.tzinfo is None:
+            now = datetime.now()
+        else:
+            now = datetime.now(value.tzinfo)
+        seconds = max(0, int((now - value).total_seconds()))
+        minutes, seconds = divmod(seconds, 60)
+        if minutes:
+            return f"{minutes}m{seconds:02d}s"
+        return f"{seconds}s"
+
+    async def _task_lock_renew_loop(self, task_id: int, coroutine_id: int, log_prefix: str):
+        """任务执行期间定时续锁，防止长任务被 acquire_tasks 当作超时任务释放。"""
+        interval = self._task_lock_renew_interval()
+        while self._running:
+            await asyncio.sleep(interval)
+            db = SessionLocal()
+            try:
+                task = db.query(CrawlTask).filter(CrawlTask.id == task_id).first()
+                if not task:
+                    logger.warning(f"[{log_prefix}-{coroutine_id}] 续锁停止，任务不存在 task={task_id}")
+                    return
+                if task.status != TaskStatus.RUNNING.value or task.worker_id != self.worker_id:
+                    logger.warning(
+                        f"[{log_prefix}-{coroutine_id}] 续锁停止，任务已不属于当前 worker "
+                        f"task={task_id} status={task.status} worker={task.worker_id}"
+                    )
+                    return
+                if not TaskManager(db, self.worker_id).renew_task_lock(task):
+                    return
+                logger.info(
+                    f"[{log_prefix}-{coroutine_id}] 任务仍在运行 "
+                    f"task={task.id} type={task.task_type} target={task.target_id} "
+                    f"运行={self._format_elapsed(task.started_at)} 续锁=成功"
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                db.rollback()
+                logger.warning(f"[{log_prefix}-{coroutine_id}] 续期任务锁失败 task={task_id}: {e}")
+            finally:
+                db.close()
+
+    async def _execute_task_with_lock_renewal(
+        self,
+        task,
+        task_type: str,
+        coroutine_id: int,
+        crawler,
+        log_prefix: str,
+    ) -> bool:
+        renew_task = asyncio.create_task(
+            self._task_lock_renew_loop(task.id, coroutine_id, log_prefix)
+        )
+        try:
+            return await self._execute_task(task, task_type, coroutine_id, crawler)
+        finally:
+            renew_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await renew_task
+
     # ------------------------------------------------------------------ #
     # 任务获取                                                              #
     # ------------------------------------------------------------------ #
 
-    async def _acquire_next_task(self):
-        """按优先级尝试获取一个任务：CATEGORY → LIST → DETAIL。
+    async def _acquire_next_task(self, task_types: list[str] | None = None):
+        """按优先级尝试获取一个任务。
 
         返回 (task, task_type) 或 (None, None)。
         使用独立 DB session，获取后立即关闭，执行阶段用新 session。
         """
+        task_types = task_types or [TaskType.CATEGORY.value, TaskType.LIST.value, TaskType.DETAIL.value]
         db = SessionLocal()
         try:
             tm = TaskManager(db, self.worker_id)
-            for task_type in [TaskType.CATEGORY.value, TaskType.LIST.value, TaskType.DETAIL.value]:
+            for task_type in task_types:
                 tasks = tm.acquire_tasks(task_type, limit=1)
                 if tasks:
                     return tasks[0], task_type
-            # 无任务时顺便重置失败任务
-            self._maybe_retry_failed(db, tm)
             return None, None
         except Exception as e:
             logger.error(f"获取任务失败: {e}")
@@ -264,14 +363,6 @@ class DistributedWorker:
             return None, None
         finally:
             db.close()
-
-    def _maybe_retry_failed(self, db, tm: TaskManager):
-        try:
-            failed_tasks = tm.get_failed_tasks(limit=3)
-            for task in failed_tasks:
-                tm.retry_task(task)
-        except Exception as e:
-            logger.warning(f"重置失败任务出错: {e}")
 
     async def _fail_acquired_task(self, task, coroutine_id: int, error: Exception):
         """Mark an already-acquired task as failed when setup fails before task execution."""
@@ -301,6 +392,8 @@ class DistributedWorker:
             return await self._execute_list_task(task, coroutine_id, crawler)
         elif task_type == TaskType.DETAIL.value:
             return await self._execute_detail_task(task, coroutine_id, crawler)
+        elif task_type == TaskType.COMMENT.value:
+            return await self._execute_comment_task(task, coroutine_id, crawler)
         return False
 
     async def _execute_category_task(self, task, coroutine_id: int, crawler):
@@ -313,9 +406,12 @@ class DistributedWorker:
         try:
             tm = TaskManager(db, self.worker_id)
             index_service = IndexService(db)
-            tm.renew_task_lock(task)
+            if not self._renew_task_or_skip(tm, task, tag):
+                return False
 
             categories = await crawler.crawl()
+            if not self._renew_task_or_skip(tm, task, tag):
+                return False
             new_count = 0
             updated_count = 0
             scheduled_list_tasks = 0
@@ -358,12 +454,16 @@ class DistributedWorker:
                 f"{tag} 完成 task={task.id} 新增分类={new_count} 更新分类={updated_count} "
                 f"分类总数={len(categories)} 列表任务={scheduled_list_tasks}"
             )
-            tm.complete_task(task)
+            if not tm.complete_task(task):
+                return False
             await crawler.report_cookie_result(success=True)
             await crawler.report_proxy_result(success=True)
             await self.increment_stats(completed=1)
             return True
 
+        except ProxyUnavailableError as e:
+            await self._handle_proxy_unavailable(task, coroutine_id, e)
+            return False
         except Exception as e:
             db.rollback()
             error_msg = str(e)
@@ -391,10 +491,13 @@ class DistributedWorker:
         db = SessionLocal()
         try:
             tm = TaskManager(db, self.worker_id)
-            tm.renew_task_lock(task)
+            if not self._renew_task_or_skip(tm, task, tag):
+                return False
 
             category = db.query(Category).filter(Category.field_tag == field_tag).first()
             journals = await crawler.crawl(field_tag, page)
+            if not self._renew_task_or_skip(tm, task, tag):
+                return False
             new_count = 0
             updated_count = 0
             detail_task_count = 0
@@ -434,7 +537,8 @@ class DistributedWorker:
                 if detail_task:
                     detail_task_count += 1
 
-            tm.complete_task(task)
+            if not tm.complete_task(task):
+                return False
             await crawler.report_cookie_result(success=True)
             await crawler.report_proxy_result(success=True)
             await self.increment_stats(completed=1)
@@ -444,6 +548,9 @@ class DistributedWorker:
             )
             return True
 
+        except ProxyUnavailableError as e:
+            await self._handle_proxy_unavailable(task, coroutine_id, e)
+            return False
         except Exception as e:
             db.rollback()
             error_msg = str(e)
@@ -460,7 +567,6 @@ class DistributedWorker:
 
     async def _execute_detail_task(self, task, coroutine_id: int, crawler):
         from app.models.journal import Journal
-        from app.models.comment import Comment
 
         journal_id = int(task.target_id)
         tag = f"[消费者-{coroutine_id}][详情]"
@@ -469,13 +575,31 @@ class DistributedWorker:
         db = SessionLocal()
         try:
             tm = TaskManager(db, self.worker_id)
-            tm.renew_task_lock(task)
+            if not self._renew_task_or_skip(tm, task, tag):
+                return False
 
             detail = await crawler.crawl(journal_id)
+            if not self._renew_task_or_skip(tm, task, tag):
+                return False
 
             journal = db.query(Journal).filter(Journal.journal_id == journal_id).first()
             if journal:
-                basic_info = detail.get("basic_info", {})
+                fresh_basic_info = detail.get("basic_info", {})
+                quality_service = DetailQualityService(db)
+                quality = quality_service.audit_data(journal_id, fresh_basic_info)
+                if not quality.ok:
+                    quality_service.record_result(journal_id, quality)
+                    db.commit()
+                    raise DataValidationError(
+                        f"期刊 {journal_id} 详情质量检查未通过: {','.join(quality.hard_reasons)}",
+                        missing_fields=quality.missing_required,
+                        extracted_fields=quality.field_count,
+                    )
+
+                basic_info = {
+                    **(journal.detail_data or {}),
+                    **fresh_basic_info,
+                }
                 journal.issn = basic_info.get("issn", journal.issn)
                 journal.eissn = basic_info.get("E-ISSN")
                 journal.impact_factor = clean_numeric_value(basic_info.get("impact_factor")) or journal.impact_factor
@@ -491,41 +615,24 @@ class DistributedWorker:
                 journal.detail_crawled = True
                 db.commit()
 
-                seen_comment_ids = set()
-                comments_to_insert = []
-                for c_data in detail.get("comments", []):
-                    comment_id = c_data.get("comment_id")
-                    if not comment_id or comment_id in seen_comment_ids:
-                        continue
-                    seen_comment_ids.add(comment_id)
-                    comments_to_insert.append({
-                        "journal_id": journal.journal_id,
-                        "comment_id": comment_id,
-                        "content": c_data.get("content"),
-                        "author": c_data.get("author"),
-                        "rating": c_data.get("rating"),
-                        "submit_experience": c_data.get("submit_experience"),
-                        "comment_time": c_data.get("comment_time")
-                    })
-
-                if comments_to_insert:
-                    from sqlalchemy.dialects.postgresql import insert
-                    stmt = insert(Comment).values(comments_to_insert)
-                    stmt = stmt.on_conflict_do_nothing(index_elements=['comment_id'])
-                    db.execute(stmt)
-                    db.commit()
-
-                journal.comments_crawled = True
+                quality_service.mark_detail_problems_resolved(journal_id)
                 MetricService(db).record_snapshot(journal, basic_info, task_id=task.id)
+                comment_task = tm.create_comment_task(journal_id, journal.category_id)
                 db.commit()
+                if comment_task:
+                    logger.info(f"{tag} 已创建评论任务 task={comment_task.id} journal_id={journal_id}")
 
-            tm.complete_task(task)
+            if not tm.complete_task(task):
+                return False
             await crawler.report_cookie_result(success=True)
             await crawler.report_proxy_result(success=True)
             await self.increment_stats(completed=1)
             logger.info(f"{tag} 完成 task={task.id} journal_id={journal_id}")
             return True
 
+        except ProxyUnavailableError as e:
+            await self._handle_proxy_unavailable(task, coroutine_id, e)
+            return False
         except Exception as e:
             db.rollback()
             error_msg = str(e)
@@ -540,16 +647,103 @@ class DistributedWorker:
         finally:
             db.close()
 
+    async def _execute_comment_task(self, task, coroutine_id: int, crawler):
+        from app.models.journal import Journal
+        from app.models.comment import Comment
+
+        journal_id = int(task.target_id)
+        tag = f"[评论消费者-{coroutine_id}][评论]"
+        logger.info(f"{tag} 开始 task={task.id} journal_id={journal_id}")
+
+        db = SessionLocal()
+        try:
+            tm = TaskManager(db, self.worker_id)
+            if not self._renew_task_or_skip(tm, task, tag):
+                return False
+
+            comments, comment_info = await crawler.crawl_comments_only(journal_id)
+            if not self._renew_task_or_skip(tm, task, tag):
+                return False
+
+            journal = db.query(Journal).filter(Journal.journal_id == journal_id).first()
+            if journal:
+                seen_comment_ids = set()
+                comments_to_insert = []
+                for c_data in comments:
+                    comment_id = c_data.get("comment_id")
+                    if not comment_id or comment_id in seen_comment_ids:
+                        continue
+                    seen_comment_ids.add(comment_id)
+                    comments_to_insert.append({
+                        "journal_id": journal.journal_id,
+                        "comment_id": comment_id,
+                        "content": c_data.get("content"),
+                        "author": c_data.get("author"),
+                        "rating": c_data.get("rating"),
+                        "submit_experience": c_data.get("submit_experience"),
+                        "comment_time": c_data.get("comment_time"),
+                    })
+
+                if comments_to_insert:
+                    from sqlalchemy.dialects.postgresql import insert
+                    stmt = insert(Comment).values(comments_to_insert)
+                    stmt = stmt.on_conflict_do_nothing(index_elements=["comment_id"])
+                    db.execute(stmt)
+                    db.commit()
+
+                basic_info = dict(journal.detail_data or {})
+                basic_info["comment_count"] = comment_info.get("total_count", 0)
+                basic_info["comment_pages"] = comment_info.get("total_pages", 0)
+                basic_info["crawled_comment_count"] = comment_info.get("crawled_count", 0)
+                journal.detail_data = basic_info
+                journal.comments_crawled = True
+                MetricService(db).record_snapshot(journal, basic_info, task_id=task.id)
+                db.commit()
+
+            if not tm.complete_task(task):
+                return False
+            await crawler.report_cookie_result(success=True)
+            await crawler.report_proxy_result(success=True)
+            await self.increment_stats(completed=1)
+            logger.info(
+                f"{tag} 完成 task={task.id} journal_id={journal_id} "
+                f"评论={comment_info.get('crawled_count', 0)}/{comment_info.get('total_count', 0)}"
+            )
+            return True
+
+        except ProxyUnavailableError as e:
+            await self._handle_proxy_unavailable(task, coroutine_id, e)
+            return False
+        except Exception as e:
+            db.rollback()
+            error_msg = str(e)
+            logger.exception(f"{tag} 失败 task={task.id} journal_id={journal_id}")
+            TaskManager(db, self.worker_id).fail_task(task, error_msg)
+            await crawler.report_cookie_result(success=False)
+            await crawler.report_proxy_result(success=False)
+            await self.increment_stats(failed=1)
+            await self._handle_request_failure(crawler)
+            return False
+        finally:
+            db.close()
+
     # ------------------------------------------------------------------ #
     # 消费者主循环                                                          #
     # ------------------------------------------------------------------ #
 
-    async def _consumer_loop(self, coroutine_id: int):
+    async def _consumer_loop(
+        self,
+        coroutine_id: int,
+        task_types: list[str] | None = None,
+        log_prefix: str = "消费者",
+    ):
         """持久消费者协程：独立拉取任务，完成即拉下一个。
 
         HTTP 模式复用 httpx client/session；browser 模式复用 browser，只换 context。
         """
-        logger.info(f"[消费者-{coroutine_id}] 启动")
+        task_types = task_types or [TaskType.CATEGORY.value, TaskType.LIST.value, TaskType.DETAIL.value]
+        consumer_key = f"{log_prefix}:{coroutine_id}"
+        logger.info(f"[{log_prefix}-{coroutine_id}] 启动 task_types={task_types}")
         crawler = None
         current_crawler_type = None
         fetch_mode = config.CRAWLER_FETCH_MODE
@@ -559,97 +753,111 @@ class DistributedWorker:
                 await asyncio.sleep(1)
                 continue
 
-            task, task_type = await self._acquire_next_task()
+            task, task_type = await self._acquire_next_task(task_types)
 
             if task is None:
-                logger.debug(f"[消费者-{coroutine_id}] 无任务，等待 {self.NO_TASK_SLEEP_SECONDS}s")
+                logger.debug(f"[{log_prefix}-{coroutine_id}] 无任务，等待 {self.NO_TASK_SLEEP_SECONDS}s")
                 await asyncio.sleep(self.NO_TASK_SLEEP_SECONDS)
                 continue
 
-            use_cookie = (task_type == TaskType.DETAIL.value)
+            use_cookie = task_type in (TaskType.DETAIL.value, TaskType.COMMENT.value)
 
             try:
                 CrawlerClass = _CRAWLER_CLASS[task_type]
                 if crawler is not None and current_crawler_type != task_type:
                     await crawler.close()
                     crawler = None
-                    self._consumer_proxy_ids.pop(coroutine_id, None)
+                    self._consumer_proxy_ids.pop(consumer_key, None)
 
                 if crawler is None:
                     async with self._proxy_assignment_lock:
                         exclude_ids = [
                             proxy_id
-                            for cid, proxy_id in self._consumer_proxy_ids.items()
-                            if cid != coroutine_id
+                            for key, proxy_id in self._consumer_proxy_ids.items()
+                            if key != consumer_key
                         ]
                         crawler = CrawlerClass()
                         crawler.set_proxy_exclude_ids(exclude_ids)
                         if fetch_mode == "browser":
                             await crawler.init_browser(use_proxy=True, use_cookie=use_cookie)
-                            logger.info(f"[消费者-{coroutine_id}] 新建 browser type={task_type}")
+                            logger.info(f"[{log_prefix}-{coroutine_id}] 新建 browser type={task_type}")
                         else:
                             await crawler.init_http(use_proxy=True)
-                            logger.info(f"[消费者-{coroutine_id}] 新建 http client type={task_type}")
+                            logger.info(f"[{log_prefix}-{coroutine_id}] 新建 http client type={task_type}")
                         proxy_info = crawler.get_current_proxy_info()
                         if proxy_info and proxy_info.get("id"):
-                            self._consumer_proxy_ids[coroutine_id] = int(proxy_info["id"])
+                            self._consumer_proxy_ids[consumer_key] = int(proxy_info["id"])
                             logger.info(
-                                f"[消费者-{coroutine_id}] 分配代理 ID={proxy_info['id']} "
+                                f"[{log_prefix}-{coroutine_id}] 分配代理 ID={proxy_info['id']} "
                                 f"(排除={exclude_ids})"
                             )
                         else:
-                            self._consumer_proxy_ids.pop(coroutine_id, None)
+                            self._consumer_proxy_ids.pop(consumer_key, None)
                         current_crawler_type = task_type
                 else:
                     if fetch_mode == "browser":
                         try:
                             await crawler.reset_context(use_cookie=use_cookie)
-                            logger.debug(f"[消费者-{coroutine_id}] 复用 browser，重置 context")
+                            logger.debug(f"[{log_prefix}-{coroutine_id}] 复用 browser，重置 context")
                         except Exception as e:
-                            logger.warning(f"[消费者-{coroutine_id}] reset_context 失败({e})，重建 browser")
+                            logger.warning(f"[{log_prefix}-{coroutine_id}] reset_context 失败({e})，重建 browser")
                             await crawler.close()
-                            self._consumer_proxy_ids.pop(coroutine_id, None)
+                            self._consumer_proxy_ids.pop(consumer_key, None)
                             async with self._proxy_assignment_lock:
                                 exclude_ids = [
                                     proxy_id
-                                    for cid, proxy_id in self._consumer_proxy_ids.items()
-                                    if cid != coroutine_id
+                                    for key, proxy_id in self._consumer_proxy_ids.items()
+                                    if key != consumer_key
                                 ]
                                 crawler = CrawlerClass()
                                 crawler.set_proxy_exclude_ids(exclude_ids)
                                 await crawler.init_browser(use_proxy=True, use_cookie=use_cookie)
                                 proxy_info = crawler.get_current_proxy_info()
                                 if proxy_info and proxy_info.get("id"):
-                                    self._consumer_proxy_ids[coroutine_id] = int(proxy_info["id"])
+                                    self._consumer_proxy_ids[consumer_key] = int(proxy_info["id"])
                                 current_crawler_type = task_type
                     else:
-                        logger.debug(f"[消费者-{coroutine_id}] 复用 http client")
+                        logger.debug(f"[{log_prefix}-{coroutine_id}] 复用 http client")
+            except ProxyUnavailableError as e:
+                await self._handle_proxy_unavailable(task, coroutine_id, e)
+                if crawler:
+                    await crawler.close()
+                    crawler = None
+                    self._consumer_proxy_ids.pop(consumer_key, None)
+                current_crawler_type = None
+                continue
             except Exception as e:
                 await self._fail_acquired_task(task, coroutine_id, e)
                 if crawler:
                     await crawler.close()
                     crawler = None
-                    self._consumer_proxy_ids.pop(coroutine_id, None)
+                    self._consumer_proxy_ids.pop(consumer_key, None)
                 current_crawler_type = None
                 continue
 
-            task_success = await self._execute_task(task, task_type, coroutine_id, crawler)
+            task_success = await self._execute_task_with_lock_renewal(
+                task,
+                task_type,
+                coroutine_id,
+                crawler,
+                log_prefix,
+            )
             proxy_info = crawler.get_current_proxy_info() if crawler else None
             if proxy_info and proxy_info.get("id"):
-                self._consumer_proxy_ids[coroutine_id] = int(proxy_info["id"])
+                self._consumer_proxy_ids[consumer_key] = int(proxy_info["id"])
             else:
-                self._consumer_proxy_ids.pop(coroutine_id, None)
+                self._consumer_proxy_ids.pop(consumer_key, None)
 
             if not task_success or (fetch_mode == "browser" and crawler.is_using_direct()):
                 await crawler.close()
                 crawler = None
-                self._consumer_proxy_ids.pop(coroutine_id, None)
+                self._consumer_proxy_ids.pop(consumer_key, None)
                 current_crawler_type = None
 
         if crawler:
             await crawler.close()
-        self._consumer_proxy_ids.pop(coroutine_id, None)
-        logger.info(f"[消费者-{coroutine_id}] 退出")
+        self._consumer_proxy_ids.pop(consumer_key, None)
+        logger.info(f"[{log_prefix}-{coroutine_id}] 退出")
 
     # ------------------------------------------------------------------ #
     # 主入口                                                               #
@@ -671,9 +879,28 @@ class DistributedWorker:
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
         n = config.PARALLEL_WORKERS
-        logger.info(f"Worker开始运行: {self.worker_id}，消费者协程数: {n}")
+        comment_n = max(0, config.COMMENT_PARALLEL_WORKERS)
+        logger.info(
+            f"Worker开始运行: {self.worker_id}，详情/列表消费者协程数: {n}，"
+            f"评论消费者协程数: {comment_n}"
+        )
 
-        consumer_tasks = [asyncio.create_task(self._consumer_loop(i)) for i in range(n)]
+        consumer_tasks = [
+            asyncio.create_task(self._consumer_loop(
+                i,
+                [TaskType.CATEGORY.value, TaskType.LIST.value, TaskType.DETAIL.value],
+                "消费者",
+            ))
+            for i in range(n)
+        ]
+        consumer_tasks.extend(
+            asyncio.create_task(self._consumer_loop(
+                i,
+                [TaskType.COMMENT.value],
+                "评论消费者",
+            ))
+            for i in range(comment_n)
+        )
 
         try:
             await asyncio.gather(*consumer_tasks)

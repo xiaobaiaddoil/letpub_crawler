@@ -40,7 +40,7 @@ class TaskManager:
     def __init__(self, db: Session, worker_id: str = None):
         self.db = db
         self.worker_id = worker_id or generate_worker_id()
-        logger.info(f"TaskManager 初始化，worker_id: {self.worker_id}")
+        logger.debug(f"TaskManager 初始化，worker_id: {self.worker_id}")
 
     @staticmethod
     def _reset_task_to_pending(task: CrawlTask):
@@ -168,6 +168,62 @@ class TaskManager:
         self.db.refresh(task)
         return task
 
+    def create_comment_task(
+        self,
+        journal_id: int,
+        category_id: int = None,
+        refresh_completed: bool = False,
+    ) -> Optional[CrawlTask]:
+        """创建评论爬取任务。
+
+        评论任务独立于详情任务执行，避免评论页较多时占住详情抓取 consumer。
+        """
+        journal = self.db.query(Journal).filter(
+            Journal.journal_id == journal_id
+        ).first()
+
+        if journal and journal.comments_crawled and not refresh_completed:
+            return None
+
+        target_id = str(journal_id)
+        url = f"{config.BASE_URL}/journalappAjax_comments_center.php"
+        extra_data = json.dumps({"journal_id": journal_id, "category_id": category_id})
+
+        existing = self.db.query(CrawlTask).filter(
+            CrawlTask.task_type == TaskType.COMMENT.value,
+            CrawlTask.target_id == target_id
+        ).order_by(CrawlTask.id.desc()).first()
+
+        if existing:
+            existing.target_url = url
+            existing.extra_data = extra_data
+            if existing.status in (TaskStatus.PENDING.value, TaskStatus.RUNNING.value):
+                self.db.commit()
+                self.db.refresh(existing)
+                return existing
+            if (
+                refresh_completed
+                or existing.status == TaskStatus.FAILED.value
+                or (journal and not journal.comments_crawled)
+            ):
+                self._reset_task_to_pending(existing)
+                self.db.commit()
+                self.db.refresh(existing)
+                return existing
+            return None
+
+        task = CrawlTask(
+            task_type=TaskType.COMMENT.value,
+            target_id=target_id,
+            target_url=url,
+            status=TaskStatus.PENDING.value,
+            extra_data=extra_data,
+        )
+        self.db.add(task)
+        self.db.commit()
+        self.db.refresh(task)
+        return task
+
     def reset_or_create_detail_task(self, journal_id: int, category_id: int = None) -> CrawlTask:
         """重置或创建详情任务，用于增量更新和手动重爬.
 
@@ -261,7 +317,8 @@ class TaskManager:
             # 先释放超时的任务（被其他节点锁定但超时的）
             self._release_timeout_tasks(timeout_threshold)
 
-            # 构建查询：获取 PENDING 状态的任务
+            # 优先获取 PENDING；不足 limit 时，再调度未超过重试上限的 FAILED。
+            # 这样历史失败任务不会压过新任务，但仍然是可调度任务。
             query = self.db.query(CrawlTask).filter(
                 CrawlTask.status == TaskStatus.PENDING.value
             )
@@ -273,12 +330,25 @@ class TaskManager:
             # SKIP LOCKED: 跳过已被锁定的行，避免等待
             tasks = query.order_by(CrawlTask.created_at).limit(limit).with_for_update(skip_locked=True).all()
 
+            remaining = limit - len(tasks)
+            if remaining > 0:
+                retry_query = self.db.query(CrawlTask).filter(
+                    CrawlTask.status == TaskStatus.FAILED.value,
+                    CrawlTask.retry_count < CrawlTask.max_retry,
+                )
+                if task_type:
+                    retry_query = retry_query.filter(CrawlTask.task_type == task_type)
+                retry_tasks = retry_query.order_by(CrawlTask.created_at).limit(remaining).with_for_update(skip_locked=True).all()
+                tasks.extend(retry_tasks)
+
             for task in tasks:
                 # 原子性地更新任务状态
                 task.status = TaskStatus.RUNNING.value
                 task.worker_id = self.worker_id
                 task.locked_at = now
                 task.started_at = now
+                task.completed_at = None
+                task.error_message = None
                 acquired_tasks.append(task)
 
             self.db.commit()
@@ -311,12 +381,15 @@ class TaskManager:
         except Exception as e:
             logger.error(f"释放超时任务失败: {e}")
 
-    def get_failed_tasks(self, limit: int = 10) -> List[CrawlTask]:
+    def get_failed_tasks(self, limit: int = 10, task_type: str = None) -> List[CrawlTask]:
         """获取失败任务（可重试）"""
-        return self.db.query(CrawlTask).filter(
+        query = self.db.query(CrawlTask).filter(
             CrawlTask.status == TaskStatus.FAILED.value,
             CrawlTask.retry_count < CrawlTask.max_retry
-        ).order_by(CrawlTask.created_at).limit(limit).all()
+        )
+        if task_type:
+            query = query.filter(CrawlTask.task_type == task_type)
+        return query.order_by(CrawlTask.created_at).limit(limit).all()
 
     def start_task(self, task: CrawlTask):
         """开始任务（旧方法，使用 acquire_tasks 更安全）"""
@@ -328,30 +401,45 @@ class TaskManager:
         self.db.commit()
         logger.info(f"开始任务: {task.id} ({task.task_type}) by {self.worker_id}")
 
-    def complete_task(self, task: CrawlTask):
+    def _owned_running_query(self, task: CrawlTask):
+        return self.db.query(CrawlTask).filter(
+            CrawlTask.id == task.id,
+            CrawlTask.status == TaskStatus.RUNNING.value,
+            CrawlTask.worker_id == self.worker_id,
+        )
+
+    def complete_task(self, task: CrawlTask) -> bool:
         """完成任务"""
         now = get_utc_now()
-        self.db.query(CrawlTask).filter(CrawlTask.id == task.id).update({
+        count = self._owned_running_query(task).update({
             CrawlTask.status: TaskStatus.COMPLETED.value,
             CrawlTask.completed_at: now,
             CrawlTask.locked_at: None,
         }, synchronize_session=False)
         self.db.commit()
+        if count == 0:
+            logger.warning(f"完成任务跳过: {task.id} 当前不再由 worker {self.worker_id} 持有")
+            return False
         logger.info(f"完成任务: {task.id} by {self.worker_id}")
+        return True
 
-    def renew_task_lock(self, task: CrawlTask):
+    def renew_task_lock(self, task: CrawlTask) -> bool:
         """续期任务锁定时间（防止长时间任务被误判为超时）"""
         now = get_utc_now()
-        self.db.query(CrawlTask).filter(CrawlTask.id == task.id).update({
+        count = self._owned_running_query(task).update({
             CrawlTask.locked_at: now,
         }, synchronize_session=False)
         self.db.commit()
+        if count == 0:
+            logger.warning(f"续期任务锁跳过: {task.id} 当前不再由 worker {self.worker_id} 持有")
+            return False
         logger.debug(f"续期任务锁: {task.id}")
+        return True
 
-    def fail_task(self, task: CrawlTask, error: str):
+    def fail_task(self, task: CrawlTask, error: str) -> bool:
         """任务失败"""
         now = get_utc_now()
-        self.db.query(CrawlTask).filter(CrawlTask.id == task.id).update({
+        count = self._owned_running_query(task).update({
             CrawlTask.status: TaskStatus.FAILED.value,
             CrawlTask.retry_count: CrawlTask.retry_count + 1,
             CrawlTask.error_message: error,
@@ -359,7 +447,29 @@ class TaskManager:
             CrawlTask.locked_at: None,
         }, synchronize_session=False)
         self.db.commit()
+        if count == 0:
+            logger.warning(f"标记任务失败跳过: {task.id} 当前不再由 worker {self.worker_id} 持有")
+            return False
         logger.error(f"任务失败: {task.id}, 错误: {error}, worker: {self.worker_id}")
+        return True
+
+    def release_task(self, task: CrawlTask, reason: str | None = None) -> bool:
+        """释放已领取任务回 pending，不增加失败次数。"""
+        count = self._owned_running_query(task).update({
+            CrawlTask.status: TaskStatus.PENDING.value,
+            CrawlTask.error_message: reason,
+            CrawlTask.worker_id: None,
+            CrawlTask.locked_at: None,
+            CrawlTask.started_at: None,
+        }, synchronize_session=False)
+        self.db.commit()
+        if count == 0:
+            logger.warning(f"释放任务跳过: {task.id} 当前不再由 worker {self.worker_id} 持有")
+            return False
+        logger.warning(
+            f"释放任务回待处理: {task.id}, 原因: {reason or 'unspecified'}, worker: {self.worker_id}"
+        )
+        return True
 
     def retry_task(self, task: CrawlTask):
         """重试任务"""
@@ -441,6 +551,7 @@ class TaskManager:
             journal.detail_crawled = False
             journal.comments_crawled = False
             self.reset_or_create_detail_task(journal_id, journal.category_id)
+            self.create_comment_task(journal_id, journal.category_id, refresh_completed=True)
             logger.info(f"重置期刊 {journal_id} 的详情任务")
             return True
 
@@ -465,6 +576,7 @@ class TaskManager:
             journal.detail_crawled = False
             journal.comments_crawled = False
             self.reset_or_create_detail_task(journal.journal_id, journal.category_id)
+            self.create_comment_task(journal.journal_id, journal.category_id, refresh_completed=True)
             count += 1
 
         logger.info(f"重置/创建 {count} 个详情任务")

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict
 from urllib.parse import unquote, urlparse
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 
 from app.models.proxy_pool import ProxyPool, ProxyConfig
 from app.services.crypto import encrypt_password, decrypt_password
@@ -158,6 +158,22 @@ class ProxyService:
         weights = [self._proxy_weight(proxy) for proxy in proxies]
         return random.choices(proxies, weights=weights, k=1)[0]
 
+    def _available_filter(self):
+        return (
+            ProxyPool.is_active == True,
+            ProxyPool.is_valid == True,
+            or_(
+                and_(
+                    ProxyPool.source == "clash",
+                    ProxyPool.port >= config.CLASH_LISTENER_PORT,
+                ),
+                and_(
+                    or_(ProxyPool.source != "clash", ProxyPool.source.is_(None)),
+                    ProxyPool.fail_count < self.MAX_FAIL_COUNT,
+                ),
+            ),
+        )
+
     async def get_random_proxy(self, exclude_ids: Optional[list[int]] = None) -> Optional[ProxyPool]:
         """按动态权重获取一个可用代理。"""
         exclude_ids = exclude_ids or []
@@ -169,18 +185,14 @@ class ProxyService:
             ProxyPool.is_valid == True
         ).count()
         available = self.db.query(ProxyPool).filter(
-            ProxyPool.is_active == True,
-            ProxyPool.is_valid == True,
-            ProxyPool.fail_count < self.MAX_FAIL_COUNT
+            *self._available_filter()
         ).count()
         
         if available == 0:
             logger.warning(f"[代理池] 无可用代理 - 总数:{total}, 启用:{active}, 有效:{valid}, 可用:{available}")
         
         query = self.db.query(ProxyPool).filter(
-            ProxyPool.is_active == True,
-            ProxyPool.is_valid == True,
-            ProxyPool.fail_count < self.MAX_FAIL_COUNT
+            *self._available_filter()
         )
         if exclude_ids:
             query = query.filter(~ProxyPool.id.in_(exclude_ids))
@@ -188,13 +200,7 @@ class ProxyService:
         candidates = query.order_by(ProxyPool.id.asc()).all()
         proxy = self._choose_weighted_proxy(candidates)
         if proxy is None and exclude_ids:
-            logger.warning("[代理池] 排除已分配代理后无可用代理，回退到全量随机")
-            candidates = self.db.query(ProxyPool).filter(
-                ProxyPool.is_active == True,
-                ProxyPool.is_valid == True,
-                ProxyPool.fail_count < self.MAX_FAIL_COUNT
-            ).order_by(ProxyPool.id.asc()).all()
-            proxy = self._choose_weighted_proxy(candidates)
+            logger.warning("[代理池] 排除已分配代理后无可用代理，等待代理释放")
 
         if proxy:
             proxy.last_used_at = datetime.now(timezone.utc)
@@ -225,7 +231,13 @@ class ProxyService:
         else:
             proxy.fail_count = (proxy.fail_count or 0) + 1
             proxy.total_fail_count = (proxy.total_fail_count or 0) + 1
-            if proxy.fail_count >= self.MAX_FAIL_COUNT:
+            if proxy.source == "clash":
+                proxy.is_valid = True
+                logger.warning(
+                    f"[代理] Clash入口 {proxy.ip}:{proxy.port} 请求失败，降低权重 "
+                    f"(fail={proxy.fail_count}/{self.MAX_FAIL_COUNT})"
+                )
+            elif proxy.fail_count >= self.MAX_FAIL_COUNT:
                 proxy.is_valid = False
                 logger.warning(
                     f"[代理] {proxy.ip}:{proxy.port} 连续失败 {proxy.fail_count} 次，已标记无效"
@@ -582,6 +594,16 @@ class ProxyService:
             ProxyPool.is_active == True,
             ProxyPool.is_valid == True
         ).count()
+        assignable = self.db.query(ProxyPool).filter(
+            *self._available_filter()
+        ).count()
+        inactive = self.db.query(ProxyPool).filter(
+            ProxyPool.is_active == False
+        ).count()
+        active_invalid = self.db.query(ProxyPool).filter(
+            ProxyPool.is_active == True,
+            ProxyPool.is_valid == False
+        ).count()
         tunnel_count = self.db.query(ProxyPool).filter(
             ProxyPool.proxy_type == "tunnel",
             ProxyPool.is_active == True
@@ -606,7 +628,10 @@ class ProxyService:
             "total": total,
             "active": active,
             "valid": valid,
-            "invalid": active - valid,
+            "assignable": assignable,
+            "inactive": inactive,
+            "active_invalid": active_invalid,
+            "invalid": active_invalid,
             "tunnel": tunnel_count,
             "private": private_count,
             "total_success": int(total_success),
