@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from app.database import get_db
 from app.services.task_manager import TaskManager
 from app.services.detail_quality_service import DetailQualityService
+from app.services.journal_id_resolver_service import JournalIdResolverService
 from app.models.task import CrawlTask, TaskStatus, TaskType
 from app.models.journal import Journal
 from app.models.comment import Comment
@@ -53,6 +54,11 @@ class DetailQualityRebuildRequest(BaseModel):
     dry_run: bool = True
     limit: Optional[int] = None
     include_comments: bool = False
+
+
+class DetailIdResolveRequest(BaseModel):
+    journal_ids: List[int]
+    dry_run: bool = True
 
 @router.get("/", response_model=TaskListResponse)
 def list_tasks(
@@ -221,6 +227,44 @@ def rebuild_detail_quality_tasks(
         dry_run=request.dry_run,
         limit=request.limit,
         include_comments=request.include_comments,
+    )
+
+
+@router.get("/detail-id/search")
+async def search_latest_detail_id(
+    name: Optional[str] = Query(None, description="期刊名"),
+    journal_id: Optional[int] = Query(None, description="旧期刊ID；传入后使用库内期刊名搜索"),
+    db: Session = Depends(get_db),
+):
+    """按期刊名搜索 LetPub 候选期刊ID。"""
+    search_name = (name or "").strip()
+    if journal_id is not None:
+        journal = db.query(Journal).filter(Journal.journal_id == journal_id).first()
+        if not journal:
+            raise HTTPException(status_code=404, detail="期刊不存在")
+        search_name = journal.name
+    if not search_name:
+        raise HTTPException(status_code=400, detail="必须传入 name 或 journal_id")
+
+    candidates = await JournalIdResolverService(db).search_by_journal_name(search_name)
+    return {
+        "journal_id": journal_id,
+        "name": search_name,
+        "candidates": candidates,
+    }
+
+
+@router.post("/detail-id/resolve")
+async def resolve_latest_detail_ids(
+    request: DetailIdResolveRequest,
+    db: Session = Depends(get_db),
+):
+    """通过期刊名搜索新 LetPub ID，并把旧详情任务改为使用新 ID 抓取。"""
+    if not request.journal_ids:
+        raise HTTPException(status_code=400, detail="journal_ids 不能为空")
+    return await JournalIdResolverService(db).resolve_many(
+        request.journal_ids,
+        dry_run=request.dry_run,
     )
 
 @router.post("/{task_id}/re-crawl")

@@ -131,6 +131,7 @@ def test_searches_by_journal_name_and_returns_comment_count(client):
     assert body["total"] == 1
     assert body["items"][0]["journal_id"] == 1001
     assert body["items"][0]["comment_count"] == 2
+    assert body["items"][0]["updated_at"].startswith("2026-01-02T00:00:00")
 
 
 def test_filters_by_impact_factor_range(client):

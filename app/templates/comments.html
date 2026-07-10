@@ -245,7 +245,8 @@
           期刊ID: ${journal.journal_id} |
           ISSN: ${displayValue(journal.issn)} |
           影响因子: ${displayValue(journal.impact_factor)} |
-          实时影响因子: ${displayValue(journal.impact_factor_realtime)}
+          实时影响因子: ${displayValue(journal.impact_factor_realtime)} |
+          数据更新时间: ${formatDateTime(journal.updated_at)}
       `;
       renderJournalDetails(journal, detail);
       document.getElementById('letpub-link').href =
@@ -303,6 +304,20 @@
       if (typeof value === 'object') value = JSON.stringify(value);
       const text = String(value).trim();
       return text.length > limit ? `${text.substring(0, limit)}...` : text;
+  }
+
+  function formatDateTime(value) {
+      if (!value) return '-';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return '-';
+      return date.toLocaleString('zh-CN', {
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false
+      }).replace(/\//g, '-');
   }
 
   function normalizeUrl(value) {

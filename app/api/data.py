@@ -44,6 +44,7 @@ class JournalResponse(BaseModel):
     comments_crawled: bool
     category_id: Optional[int]
     created_at: datetime
+    updated_at: Optional[datetime]
     comment_count: int = 0
     jcr_partition_summary: Optional[str] = None
     cas_partition_summary: Optional[str] = None
@@ -230,6 +231,7 @@ def _journal_to_response(
         "comments_crawled": journal.comments_crawled,
         "category_id": journal.category_id,
         "created_at": journal.created_at,
+        "updated_at": journal.updated_at,
         "comment_count": comment_count,
         "jcr_partition_summary": _summarize_jcr(jcr_source),
         "cas_partition_summary": _summarize_generic_partition(cas_source),

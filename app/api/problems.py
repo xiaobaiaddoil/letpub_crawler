@@ -8,6 +8,10 @@ from datetime import datetime
 from app.database import get_db
 from app.services.problem_service import ProblemService
 from app.services.task_manager import TaskManager
+from app.services.journal_id_resolver_service import JournalIdResolverService
+from app.services.task_error_policy import TaskErrorPolicyService
+from app.models.journal import Journal
+from app.models.problem_task import ProblemTask
 from app.models.task import CrawlTask, TaskType, TaskStatus
 
 router = APIRouter(prefix="/api/problems", tags=["problems"])
@@ -75,16 +79,75 @@ def resolve_problem(problem_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/retry-all")
-def retry_all_problems(
+async def retry_all_problems(
     problem_code: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     """重试所有未解决的问题任务"""
     service = ProblemService(db)
     task_manager = TaskManager(db)
-    
+
+    if problem_code is None:
+        codes = [
+            row[0]
+            for row in db.query(ProblemTask.problem_code)
+            .filter(ProblemTask.resolved == 0)
+            .distinct()
+            .all()
+            if row[0]
+        ]
+        items = [
+            await retry_all_problems(problem_code=code, db=db)
+            for code in codes
+        ]
+        return {
+            "message": f"已按 {len(codes)} 类错误码分别处理未解决问题",
+            "action": "dispatch_by_problem_code",
+            "items": items,
+        }
+
     journal_ids = service.get_unresolved_journal_ids(problem_code)
-    
+    if problem_code == ProblemService.CODE_COMMENT_MISMATCH:
+        created = 0
+        for jid in journal_ids:
+            journal = db.query(Journal).filter(Journal.journal_id == jid).first()
+            if not journal:
+                continue
+            journal.comments_crawled = False
+            task = task_manager.create_comment_task(
+                jid,
+                journal.category_id,
+                refresh_completed=True,
+            )
+            if task:
+                created += 1
+        db.commit()
+        return {
+            "message": f"已按错误码 {problem_code} 创建 {created} 个评论重建任务",
+            "action": "refresh_comments",
+            "created": created,
+            "requested": len(journal_ids),
+        }
+
+    if TaskErrorPolicyService.is_detail_quality_problem_code(problem_code):
+        resolution = await JournalIdResolverService(db).resolve_many(
+            journal_ids,
+            dry_run=False,
+        )
+        resolved_count = 0
+        for item in resolution["items"]:
+            if item.get("status") == "updated":
+                resolved_count += service.mark_resolved_by_journal(
+                    item["journal_id"],
+                    problem_code,
+                )
+        return {
+            "message": f"已按错误码 {problem_code} 处理 {len(journal_ids)} 个详情质量问题",
+            "action": "resolve_detail_id",
+            "resolved_problem_count": resolved_count,
+            "resolution": resolution,
+        }
+
     created = 0
     for jid in journal_ids:
         # 重置任务

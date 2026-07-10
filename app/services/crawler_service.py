@@ -6,12 +6,13 @@ from app.services.task_manager import TaskManager, generate_worker_id
 from app.models.task import TaskType, TaskStatus, CrawlTask
 from app.models.category import Category
 from app.models.journal import Journal
-from app.models.comment import Comment
 from app.database import SessionLocal
 from app.config import config
 from app.services.index_service import IndexService
 from app.services.metric_service import MetricService
 from app.services.detail_quality_service import DetailQualityService
+from app.services.task_error_policy import TaskErrorPolicyService
+from app.services.comment_refresh_service import CommentRefreshService
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,44 @@ class CrawlerService:
     def stop(self):
         self._running = False
         logger.info(f"爬虫已停止 (worker: {self.worker_id})")
+
+    @staticmethod
+    def _detail_fetch_journal_id(task) -> int:
+        journal_id = int(task.target_id)
+        try:
+            extra = json.loads(task.extra_data) if task.extra_data else {}
+            fetch_journal_id = extra.get("fetch_journal_id") or extra.get("resolved_journal_id")
+            return int(fetch_journal_id or journal_id)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return journal_id
+
+    async def _handle_task_error(
+        self,
+        db: Session,
+        task,
+        task_type: str,
+        error: Exception,
+        metadata: dict | None = None,
+    ):
+        result = await TaskErrorPolicyService(db).handle_exception(
+            task=task,
+            task_type=task_type,
+            exc=error,
+            task_manager=TaskManager(db, self.worker_id),
+            metadata=metadata,
+        )
+        logger.warning(
+            f"[错误策略] task={task.id} type={task_type} "
+            f"code={result.code.value} action={result.action.value} "
+            f"count_as_failed={result.count_as_failed}"
+        )
+        if result.resolution:
+            logger.info(
+                f"[错误策略] detail ID resolution task={task.id} "
+                f"status={result.resolution.get('status')} "
+                f"new_id={result.resolution.get('new_journal_id')}"
+            )
+        return result
 
     # ------------------------------------------------------------------ #
     # 主入口                                                               #
@@ -208,7 +247,13 @@ class CrawlerService:
         except Exception as e:
             db.rollback()
             logger.exception(f"{tag} 失败 task={task.id}")
-            TaskManager(db, self.worker_id).fail_task(task, str(e))
+            await self._handle_task_error(
+                db,
+                task,
+                TaskType.CATEGORY.value,
+                e,
+                metadata={"coroutine_id": coroutine_id},
+            )
         finally:
             db.close()
 
@@ -279,7 +324,13 @@ class CrawlerService:
         except Exception as e:
             db.rollback()
             logger.exception(f"{tag} 失败 task={task.id}")
-            TaskManager(db, self.worker_id).fail_task(task, str(e))
+            await self._handle_task_error(
+                db,
+                task,
+                TaskType.LIST.value,
+                e,
+                metadata={"coroutine_id": coroutine_id, "target_id": task.target_id},
+            )
         finally:
             db.close()
 
@@ -287,8 +338,9 @@ class CrawlerService:
         from app.crawler.detail_crawler import DetailCrawler, DataValidationError
 
         journal_id = int(task.target_id)
+        fetch_journal_id = self._detail_fetch_journal_id(task)
         tag = f"[消费者-{coroutine_id}][详情]"
-        logger.info(f"{tag} 开始 task={task.id} journal_id={journal_id}")
+        logger.info(f"{tag} 开始 task={task.id} journal_id={journal_id} fetch_journal_id={fetch_journal_id}")
 
         db = SessionLocal()
         try:
@@ -296,7 +348,7 @@ class CrawlerService:
 
             async with DetailCrawler() as crawler:
                 tm.renew_task_lock(task)
-                detail = await crawler.crawl(journal_id)
+                detail = await crawler.crawl(fetch_journal_id)
 
                 journal = db.query(Journal).filter(Journal.journal_id == journal_id).first()
                 if journal:
@@ -307,7 +359,8 @@ class CrawlerService:
                         quality_service.record_result(journal_id, quality)
                         db.commit()
                         raise DataValidationError(
-                            f"期刊 {journal_id} 详情质量检查未通过: {','.join(quality.hard_reasons)}",
+                            f"期刊 {journal_id} 详情质量检查未通过 "
+                            f"(fetch_journal_id={fetch_journal_id}): {','.join(quality.hard_reasons)}",
                             missing_fields=quality.missing_required,
                             extracted_fields=quality.field_count,
                         )
@@ -336,18 +389,40 @@ class CrawlerService:
                     db.commit()
 
             tm.complete_task(task)
-            logger.info(f"{tag} 完成 task={task.id} journal_id={journal_id}")
+            logger.info(f"{tag} 完成 task={task.id} journal_id={journal_id} fetch_journal_id={fetch_journal_id}")
 
         except DataValidationError as e:
             db.rollback()
             error_msg = f"数据校验失败: {str(e)}, 提取字段数: {e.extracted_fields}, 缺失字段: {e.missing_fields}"
             logger.warning(f"{tag} 校验失败 task={task.id}: {error_msg}")
-            TaskManager(db, self.worker_id).fail_task(task, error_msg)
+            await self._handle_task_error(
+                db,
+                task,
+                TaskType.DETAIL.value,
+                e,
+                metadata={
+                    "coroutine_id": coroutine_id,
+                    "journal_id": journal_id,
+                    "fetch_journal_id": fetch_journal_id,
+                    "extracted_fields": e.extracted_fields,
+                    "missing_fields": e.missing_fields,
+                },
+            )
 
         except Exception as e:
             db.rollback()
             logger.exception(f"{tag} 失败 task={task.id} journal_id={journal_id}")
-            TaskManager(db, self.worker_id).fail_task(task, str(e))
+            await self._handle_task_error(
+                db,
+                task,
+                TaskType.DETAIL.value,
+                e,
+                metadata={
+                    "coroutine_id": coroutine_id,
+                    "journal_id": journal_id,
+                    "fetch_journal_id": fetch_journal_id,
+                },
+            )
         finally:
             db.close()
 
@@ -368,37 +443,16 @@ class CrawlerService:
 
             journal = db.query(Journal).filter(Journal.journal_id == journal_id).first()
             if journal:
-                seen_comment_ids = set()
-                comments_to_insert = []
-                for c_data in comments:
-                    comment_id = c_data.get("comment_id")
-                    if not comment_id or comment_id in seen_comment_ids:
-                        continue
-                    seen_comment_ids.add(comment_id)
-                    comments_to_insert.append({
-                        "journal_id": journal.journal_id,
-                        "comment_id": comment_id,
-                        "content": c_data.get("content"),
-                        "author": c_data.get("author"),
-                        "rating": c_data.get("rating"),
-                        "submit_experience": c_data.get("submit_experience"),
-                        "comment_time": c_data.get("comment_time")
-                    })
-
-                if comments_to_insert:
-                    from sqlalchemy.dialects.postgresql import insert
-                    stmt = insert(Comment).values(comments_to_insert)
-                    stmt = stmt.on_conflict_do_nothing(index_elements=['comment_id'])
-                    db.execute(stmt)
-
-                basic_info = dict(journal.detail_data or {})
-                basic_info["comment_count"] = comment_info.get("total_count", 0)
-                basic_info["comment_pages"] = comment_info.get("total_pages", 0)
-                basic_info["crawled_comment_count"] = comment_info.get("crawled_count", 0)
-                journal.detail_data = basic_info
-                journal.comments_crawled = True
-                MetricService(db).record_snapshot(journal, basic_info, task_id=task.id)
-                db.commit()
+                result = CommentRefreshService(db).replace_if_complete(
+                    journal,
+                    comments,
+                    comment_info,
+                    task_id=task.id,
+                )
+                logger.info(
+                    f"{tag} 评论集合已替换 journal_id={journal_id} "
+                    f"expected={result['expected']} actual={result['actual']} inserted={result['inserted']}"
+                )
 
             tm.complete_task(task)
             logger.info(f"{tag} 完成 task={task.id} journal_id={journal_id}")
@@ -406,7 +460,13 @@ class CrawlerService:
         except Exception as e:
             db.rollback()
             logger.exception(f"{tag} 失败 task={task.id} journal_id={journal_id}")
-            TaskManager(db, self.worker_id).fail_task(task, str(e))
+            await self._handle_task_error(
+                db,
+                task,
+                TaskType.COMMENT.value,
+                e,
+                metadata={"coroutine_id": coroutine_id, "journal_id": journal_id},
+            )
         finally:
             db.close()
 

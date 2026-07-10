@@ -80,6 +80,7 @@ class BaseCrawler(ABC):
         self.page: Optional["Page"] = None
         self._playwright = None
         self.http_client: Optional[httpx.AsyncClient] = None
+        self._http_cookie_jar = httpx.Cookies()
         # Cookie 池相关
         self._current_cookie_info: Optional[Dict] = None  # 当前使用的 Cookie 信息
         # 代理相关
@@ -91,22 +92,30 @@ class BaseCrawler(ABC):
         """设置本 crawler 获取代理时应排除的代理 ID。"""
         self._proxy_exclude_ids = {int(pid) for pid in (proxy_ids or []) if pid}
 
-    async def init_http(self, use_proxy: bool = True):
-        """初始化纯 HTTP 客户端。
-
-        默认爬取链路使用 httpx，不再启动浏览器。代理选择逻辑与浏览器链路保持一致。
-        """
-        if self.http_client:
+    def _snapshot_http_cookies(self):
+        """Persist cookies before replacing the request-scoped HTTP client."""
+        if not self.http_client:
             return
+        for cookie in self.http_client.cookies.jar:
+            self._http_cookie_jar.set(
+                cookie.name,
+                cookie.value,
+                domain=cookie.domain,
+                path=cookie.path,
+            )
 
-        proxy_info = self._current_proxy_info
+    async def _create_http_client(
+        self,
+        use_proxy: bool = True,
+        exclude_proxy_ids: set[int] | None = None,
+    ):
+        """Create an HTTP client for one proxy selection cycle."""
+        proxy_info = None
         self._using_direct = False
 
-        if proxy_info:
-            logger.info(f"[HTTP代理] 复用当前代理: {proxy_display(proxy_info)}")
-        elif use_proxy:
+        if use_proxy:
             for _ in range(4):
-                proxy_info = await self._get_proxy_from_pool()
+                proxy_info = await self._get_proxy_from_pool(exclude_ids=exclude_proxy_ids)
                 if not proxy_info:
                     break
                 if await self._probe_proxy(proxy_info):
@@ -133,6 +142,7 @@ class BaseCrawler(ABC):
             timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0),
             follow_redirects=True,
             proxy=httpx_proxy_url(proxy_info),
+            cookies=self._http_cookie_jar,
             headers={
                 "User-Agent": config.USER_AGENTS[0],
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
@@ -140,20 +150,33 @@ class BaseCrawler(ABC):
             trust_env=False,
         )
 
+    async def init_http(self, use_proxy: bool = True):
+        """初始化纯 HTTP 客户端。"""
+        if self.http_client:
+            return
+        await self._create_http_client(use_proxy=use_proxy)
+
     async def ensure_http_client(self):
         """确保 HTTP 客户端可用。"""
         if not self.http_client:
-            await self.init_http(use_proxy=not self._using_direct)
+            await self.init_http(use_proxy=True)
 
     async def close_http(self):
         """关闭 HTTP 客户端。"""
         if self.http_client:
             try:
+                self._snapshot_http_cookies()
                 await self.http_client.aclose()
             except Exception as e:
                 logger.warning(f"关闭 HTTP 客户端失败: {e}")
             finally:
                 self.http_client = None
+
+    async def prepare_http_request_client(self, exclude_proxy_ids: set[int] | None = None):
+        """每个 HTTP 请求发出前重新随机选择可用代理。"""
+        await self.close_http()
+        self._current_proxy_info = None
+        await self._create_http_client(use_proxy=True, exclude_proxy_ids=exclude_proxy_ids)
 
     @staticmethod
     def _should_throttle_url(url: str) -> bool:
@@ -191,13 +214,15 @@ class BaseCrawler(ABC):
 
         last_error: Exception | None = None
         max_attempts = 4
+        request_exclude_ids: set[int] = set()
 
         for attempt in range(1, max_attempts + 1):
-            await self.ensure_http_client()
-            proxy_info = self.get_proxy_display()
+            await self.prepare_http_request_client(exclude_proxy_ids=request_exclude_ids)
             proxy_context = self.get_proxy_context_for_log()
             try:
                 response = await self.http_client.request(method, url, **kwargs)
+                self._snapshot_http_cookies()
+                await self.report_proxy_result(success=True)
                 logger.debug(
                     f"[HTTP] {method.upper()} {url} [{proxy_context}] -> {response.status_code}"
                 )
@@ -214,14 +239,10 @@ class BaseCrawler(ABC):
                     )
                     await self.report_proxy_result(success=False)
                     if failed_proxy_id:
+                        request_exclude_ids.add(int(failed_proxy_id))
                         self._proxy_exclude_ids.add(int(failed_proxy_id))
                     await self.close_http()
                     self._current_proxy_info = None
-                    await self.init_http(use_proxy=True)
-                    if self._using_direct:
-                        if not config.CRAWLER_ALLOW_DIRECT_FALLBACK:
-                            raise ProxyUnavailableError("[HTTP代理] 代理池无可用代理，已暂停直连回退")
-                        logger.warning("[HTTP代理] 代理池无可用代理，后续请求将使用直连")
                     continue
 
                 logger.error(
@@ -236,9 +257,9 @@ class BaseCrawler(ABC):
 
     def _cookie_value_from_client(self) -> Optional[str]:
         """从当前 HTTP 客户端提取 Cookie 字符串。"""
-        if not self.http_client:
-            return None
-        parts = [f"{name}={value}" for name, value in self.http_client.cookies.items()]
+        if self.http_client:
+            self._snapshot_http_cookies()
+        parts = [f"{name}={value}" for name, value in self._http_cookie_jar.items()]
         return "; ".join(parts) if parts else None
 
     def _cookie_value_from_response(self, response: httpx.Response) -> Optional[str]:
@@ -264,19 +285,26 @@ class BaseCrawler(ABC):
 
     def set_http_cookie(self, cookie_value: str):
         """把 Cookie 字符串写入 HTTP 客户端 CookieJar。"""
-        if not self.http_client or not cookie_value:
+        if not cookie_value:
             return
         for item in cookie_value.split(";"):
             item = item.strip()
             if "=" not in item:
                 continue
             name, value = item.split("=", 1)
-            self.http_client.cookies.set(
+            self._http_cookie_jar.set(
                 name.strip(),
                 value.strip(),
                 domain="www.letpub.com.cn",
                 path="/",
             )
+            if self.http_client:
+                self.http_client.cookies.set(
+                    name.strip(),
+                    value.strip(),
+                    domain="www.letpub.com.cn",
+                    path="/",
+                )
 
     async def _login_with_local_account(self) -> Optional[str]:
         """使用本地数据库中的账号登录并返回 Cookie。
@@ -314,7 +342,6 @@ class BaseCrawler(ABC):
                 logger.error("[登录] 账号密码无法解密：ENCRYPTION_KEY 不匹配或密文损坏")
                 return None
 
-            await self.ensure_http_client()
             response = await self.request_http(
                 "POST",
                 LOGIN_URL,
@@ -385,7 +412,6 @@ class BaseCrawler(ABC):
 
     async def get_cookie_for_http(self, force_login: bool = False) -> Optional[str]:
         """获取 HTTP/API 请求使用的 Cookie。"""
-        await self.ensure_http_client()
         cookie_value = None
 
         if force_login:
@@ -425,7 +451,7 @@ class BaseCrawler(ABC):
 
         return await self._login_with_local_account()
 
-    async def _get_proxy_from_pool(self) -> Optional[Dict]:
+    async def _get_proxy_from_pool(self, exclude_ids: set[int] | None = None) -> Optional[Dict]:
         """从 Master 服务器的代理池获取代理"""
         if not config.MASTER_URL:
             logger.debug("[代理] 未配置 MASTER_URL，跳过代理池")
@@ -433,8 +459,11 @@ class BaseCrawler(ABC):
 
         try:
             params = {}
-            if self._proxy_exclude_ids:
-                params["exclude_ids"] = ",".join(str(pid) for pid in sorted(self._proxy_exclude_ids))
+            merged_exclude_ids = set(self._proxy_exclude_ids)
+            if exclude_ids:
+                merged_exclude_ids.update(int(pid) for pid in exclude_ids if pid)
+            if merged_exclude_ids:
+                params["exclude_ids"] = ",".join(str(pid) for pid in sorted(merged_exclude_ids))
 
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(f"{config.MASTER_URL}/api/proxies/random", params=params)
@@ -911,8 +940,6 @@ class BaseCrawler(ABC):
     async def __aenter__(self):
         if config.CRAWLER_FETCH_MODE == "browser":
             await self.init_browser()
-        else:
-            await self.init_http()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):

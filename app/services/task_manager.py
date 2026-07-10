@@ -52,6 +52,48 @@ class TaskManager:
         task.started_at = None
         task.completed_at = None
 
+    @staticmethod
+    def _load_extra_data(extra_data: str | None) -> dict:
+        if not extra_data:
+            return {}
+        try:
+            data = json.loads(extra_data)
+            return data if isinstance(data, dict) else {}
+        except (TypeError, json.JSONDecodeError):
+            return {}
+
+    def _extra_data_with_error(
+        self,
+        task: CrawlTask,
+        error: str,
+        error_code: str | None = None,
+        error_action: str | None = None,
+        metadata: dict | None = None,
+    ) -> str | None:
+        if not error_code and not error_action and not metadata:
+            return None
+
+        row = self.db.query(CrawlTask.extra_data).filter(CrawlTask.id == task.id).first()
+        extra_data = self._load_extra_data(row[0] if row else task.extra_data)
+        last_error = {
+            "code": error_code,
+            "action": error_action,
+            "message": error,
+            "recorded_at": get_utc_now().isoformat(),
+        }
+        if metadata:
+            last_error["metadata"] = metadata
+
+        history = extra_data.get("error_history")
+        if not isinstance(history, list):
+            history = []
+        previous = extra_data.get("last_error")
+        if isinstance(previous, dict):
+            history.append(previous)
+        extra_data["last_error"] = last_error
+        extra_data["error_history"] = history[-10:]
+        return json.dumps(extra_data, ensure_ascii=False)
+
     def create_category_task(self) -> CrawlTask:
         """创建分类爬取任务"""
         # 检查是否已存在
@@ -436,38 +478,67 @@ class TaskManager:
         logger.debug(f"续期任务锁: {task.id}")
         return True
 
-    def fail_task(self, task: CrawlTask, error: str) -> bool:
+    def fail_task(
+        self,
+        task: CrawlTask,
+        error: str,
+        error_code: str | None = None,
+        error_action: str | None = None,
+        retryable: bool = True,
+        metadata: dict | None = None,
+    ) -> bool:
         """任务失败"""
         now = get_utc_now()
-        count = self._owned_running_query(task).update({
+        values = {
             CrawlTask.status: TaskStatus.FAILED.value,
-            CrawlTask.retry_count: CrawlTask.retry_count + 1,
+            CrawlTask.retry_count: CrawlTask.retry_count + 1 if retryable else CrawlTask.max_retry,
             CrawlTask.error_message: error,
             CrawlTask.completed_at: now,
             CrawlTask.locked_at: None,
-        }, synchronize_session=False)
+        }
+        extra_data = self._extra_data_with_error(task, error, error_code, error_action, metadata)
+        if extra_data is not None:
+            values[CrawlTask.extra_data] = extra_data
+
+        count = self._owned_running_query(task).update(values, synchronize_session=False)
         self.db.commit()
         if count == 0:
             logger.warning(f"标记任务失败跳过: {task.id} 当前不再由 worker {self.worker_id} 持有")
             return False
-        logger.error(f"任务失败: {task.id}, 错误: {error}, worker: {self.worker_id}")
+        logger.error(
+            f"任务失败: {task.id}, code={error_code or '-'}, action={error_action or '-'}, "
+            f"retryable={retryable}, 错误: {error}, worker: {self.worker_id}"
+        )
         return True
 
-    def release_task(self, task: CrawlTask, reason: str | None = None) -> bool:
+    def release_task(
+        self,
+        task: CrawlTask,
+        reason: str | None = None,
+        error_code: str | None = None,
+        error_action: str | None = None,
+        metadata: dict | None = None,
+    ) -> bool:
         """释放已领取任务回 pending，不增加失败次数。"""
-        count = self._owned_running_query(task).update({
+        values = {
             CrawlTask.status: TaskStatus.PENDING.value,
             CrawlTask.error_message: reason,
             CrawlTask.worker_id: None,
             CrawlTask.locked_at: None,
             CrawlTask.started_at: None,
-        }, synchronize_session=False)
+        }
+        extra_data = self._extra_data_with_error(task, reason or "", error_code, error_action, metadata)
+        if extra_data is not None:
+            values[CrawlTask.extra_data] = extra_data
+
+        count = self._owned_running_query(task).update(values, synchronize_session=False)
         self.db.commit()
         if count == 0:
             logger.warning(f"释放任务跳过: {task.id} 当前不再由 worker {self.worker_id} 持有")
             return False
         logger.warning(
-            f"释放任务回待处理: {task.id}, 原因: {reason or 'unspecified'}, worker: {self.worker_id}"
+            f"释放任务回待处理: {task.id}, code={error_code or '-'}, action={error_action or '-'}, "
+            f"原因: {reason or 'unspecified'}, worker: {self.worker_id}"
         )
         return True
 

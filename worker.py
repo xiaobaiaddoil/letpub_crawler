@@ -37,6 +37,8 @@ from app.services.problem_service import ProblemService
 from app.services.detail_quality_service import DetailQualityService
 from app.services.metric_service import MetricService
 from app.services.index_service import IndexService
+from app.services.task_error_policy import TaskErrorPolicyService
+from app.services.comment_refresh_service import CommentRefreshService
 from app.crawler.base import ProxyUnavailableError
 from app.crawler.category_crawler import CategoryCrawler
 from app.crawler.list_crawler import ListCrawler
@@ -158,12 +160,47 @@ class DistributedWorker:
             await asyncio.sleep(self.DIRECT_FAIL_SLEEP_SECONDS)
             logger.info("[直连] 休眠结束，继续工作")
 
+    async def _handle_task_error(
+        self,
+        db,
+        task,
+        task_type: str,
+        error: Exception,
+        metadata: dict | None = None,
+    ):
+        tm = TaskManager(db, self.worker_id)
+        result = await TaskErrorPolicyService(db).handle_exception(
+            task=task,
+            task_type=task_type,
+            exc=error,
+            task_manager=tm,
+            metadata=metadata,
+        )
+        logger.warning(
+            f"[错误策略] task={task.id} type={task_type} "
+            f"code={result.code.value} action={result.action.value} "
+            f"count_as_failed={result.count_as_failed}"
+        )
+        if result.resolution:
+            logger.info(
+                f"[错误策略] detail ID resolution task={task.id} "
+                f"status={result.resolution.get('status')} "
+                f"new_id={result.resolution.get('new_journal_id')}"
+            )
+        return result
+
     async def _handle_proxy_unavailable(self, task, coroutine_id: int, error: Exception):
         """Release the task without counting a failure when no proxy can be assigned."""
         db = SessionLocal()
         try:
             error_msg = str(error) or type(error).__name__
-            TaskManager(db, self.worker_id).release_task(task, error_msg)
+            await self._handle_task_error(
+                db,
+                task,
+                task.task_type,
+                error,
+                metadata={"coroutine_id": coroutine_id},
+            )
             logger.warning(
                 f"[消费者-{coroutine_id}] 代理不可用，任务退回等待 task={task.id}: {error_msg}"
             )
@@ -288,6 +325,16 @@ class DistributedWorker:
             return f"{minutes}m{seconds:02d}s"
         return f"{seconds}s"
 
+    @staticmethod
+    def _detail_fetch_journal_id(task) -> int:
+        journal_id = int(task.target_id)
+        try:
+            extra = json.loads(task.extra_data) if task.extra_data else {}
+            fetch_journal_id = extra.get("fetch_journal_id") or extra.get("resolved_journal_id")
+            return int(fetch_journal_id or journal_id)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return journal_id
+
     async def _task_lock_renew_loop(self, task_id: int, coroutine_id: int, log_prefix: str):
         """任务执行期间定时续锁，防止长任务被 acquire_tasks 当作超时任务释放。"""
         interval = self._task_lock_renew_interval()
@@ -369,8 +416,15 @@ class DistributedWorker:
         db = SessionLocal()
         try:
             error_msg = str(error) or type(error).__name__
-            TaskManager(db, self.worker_id).fail_task(task, error_msg)
-            await self.increment_stats(failed=1)
+            result = await self._handle_task_error(
+                db,
+                task,
+                task.task_type,
+                error,
+                metadata={"coroutine_id": coroutine_id, "stage": "prepare"},
+            )
+            if result.count_as_failed:
+                await self.increment_stats(failed=1)
             logger.error(
                 f"[消费者-{coroutine_id}] 任务准备失败 task={task.id}",
                 exc_info=(type(error), error, error.__traceback__),
@@ -469,10 +523,18 @@ class DistributedWorker:
             error_msg = str(e)
             logger.exception(f"{tag} 失败 task={task.id}")
             await self._save_failed_html(crawler, "category", error_msg)
-            TaskManager(db, self.worker_id).fail_task(task, error_msg)
-            await crawler.report_cookie_result(success=False)
-            await crawler.report_proxy_result(success=False)
-            await self.increment_stats(failed=1)
+            result = await self._handle_task_error(
+                db,
+                task,
+                TaskType.CATEGORY.value,
+                e,
+                metadata={"coroutine_id": coroutine_id},
+            )
+            if result.report_resource_failure:
+                await crawler.report_cookie_result(success=False)
+                await crawler.report_proxy_result(success=False)
+            if result.count_as_failed:
+                await self.increment_stats(failed=1)
             await self._handle_request_failure(crawler)
             return False
         finally:
@@ -556,10 +618,18 @@ class DistributedWorker:
             error_msg = str(e)
             logger.exception(f"{tag} 失败 task={task.id}")
             await self._save_failed_html(crawler, task.target_id, error_msg)
-            TaskManager(db, self.worker_id).fail_task(task, error_msg)
-            await crawler.report_cookie_result(success=False)
-            await crawler.report_proxy_result(success=False)
-            await self.increment_stats(failed=1)
+            result = await self._handle_task_error(
+                db,
+                task,
+                TaskType.LIST.value,
+                e,
+                metadata={"coroutine_id": coroutine_id, "target_id": task.target_id},
+            )
+            if result.report_resource_failure:
+                await crawler.report_cookie_result(success=False)
+                await crawler.report_proxy_result(success=False)
+            if result.count_as_failed:
+                await self.increment_stats(failed=1)
             await self._handle_request_failure(crawler)
             return False
         finally:
@@ -569,8 +639,9 @@ class DistributedWorker:
         from app.models.journal import Journal
 
         journal_id = int(task.target_id)
+        fetch_journal_id = self._detail_fetch_journal_id(task)
         tag = f"[消费者-{coroutine_id}][详情]"
-        logger.info(f"{tag} 开始 task={task.id} journal_id={journal_id}")
+        logger.info(f"{tag} 开始 task={task.id} journal_id={journal_id} fetch_journal_id={fetch_journal_id}")
 
         db = SessionLocal()
         try:
@@ -578,7 +649,7 @@ class DistributedWorker:
             if not self._renew_task_or_skip(tm, task, tag):
                 return False
 
-            detail = await crawler.crawl(journal_id)
+            detail = await crawler.crawl(fetch_journal_id)
             if not self._renew_task_or_skip(tm, task, tag):
                 return False
 
@@ -591,7 +662,8 @@ class DistributedWorker:
                     quality_service.record_result(journal_id, quality)
                     db.commit()
                     raise DataValidationError(
-                        f"期刊 {journal_id} 详情质量检查未通过: {','.join(quality.hard_reasons)}",
+                        f"期刊 {journal_id} 详情质量检查未通过 "
+                        f"(fetch_journal_id={fetch_journal_id}): {','.join(quality.hard_reasons)}",
                         missing_fields=quality.missing_required,
                         extracted_fields=quality.field_count,
                     )
@@ -627,7 +699,7 @@ class DistributedWorker:
             await crawler.report_cookie_result(success=True)
             await crawler.report_proxy_result(success=True)
             await self.increment_stats(completed=1)
-            logger.info(f"{tag} 完成 task={task.id} journal_id={journal_id}")
+            logger.info(f"{tag} 完成 task={task.id} journal_id={journal_id} fetch_journal_id={fetch_journal_id}")
             return True
 
         except ProxyUnavailableError as e:
@@ -638,10 +710,22 @@ class DistributedWorker:
             error_msg = str(e)
             logger.exception(f"{tag} 失败 task={task.id} journal_id={journal_id}")
             await self._save_failed_html(crawler, task.target_id, error_msg)
-            TaskManager(db, self.worker_id).fail_task(task, error_msg)
-            await crawler.report_cookie_result(success=False)
-            await crawler.report_proxy_result(success=False)
-            await self.increment_stats(failed=1)
+            result = await self._handle_task_error(
+                db,
+                task,
+                TaskType.DETAIL.value,
+                e,
+                metadata={
+                    "coroutine_id": coroutine_id,
+                    "journal_id": journal_id,
+                    "fetch_journal_id": fetch_journal_id,
+                },
+            )
+            if result.report_resource_failure:
+                await crawler.report_cookie_result(success=False)
+                await crawler.report_proxy_result(success=False)
+            if result.count_as_failed:
+                await self.increment_stats(failed=1)
             await self._handle_request_failure(crawler)
             return False
         finally:
@@ -649,7 +733,6 @@ class DistributedWorker:
 
     async def _execute_comment_task(self, task, coroutine_id: int, crawler):
         from app.models.journal import Journal
-        from app.models.comment import Comment
 
         journal_id = int(task.target_id)
         tag = f"[评论消费者-{coroutine_id}][评论]"
@@ -667,38 +750,16 @@ class DistributedWorker:
 
             journal = db.query(Journal).filter(Journal.journal_id == journal_id).first()
             if journal:
-                seen_comment_ids = set()
-                comments_to_insert = []
-                for c_data in comments:
-                    comment_id = c_data.get("comment_id")
-                    if not comment_id or comment_id in seen_comment_ids:
-                        continue
-                    seen_comment_ids.add(comment_id)
-                    comments_to_insert.append({
-                        "journal_id": journal.journal_id,
-                        "comment_id": comment_id,
-                        "content": c_data.get("content"),
-                        "author": c_data.get("author"),
-                        "rating": c_data.get("rating"),
-                        "submit_experience": c_data.get("submit_experience"),
-                        "comment_time": c_data.get("comment_time"),
-                    })
-
-                if comments_to_insert:
-                    from sqlalchemy.dialects.postgresql import insert
-                    stmt = insert(Comment).values(comments_to_insert)
-                    stmt = stmt.on_conflict_do_nothing(index_elements=["comment_id"])
-                    db.execute(stmt)
-                    db.commit()
-
-                basic_info = dict(journal.detail_data or {})
-                basic_info["comment_count"] = comment_info.get("total_count", 0)
-                basic_info["comment_pages"] = comment_info.get("total_pages", 0)
-                basic_info["crawled_comment_count"] = comment_info.get("crawled_count", 0)
-                journal.detail_data = basic_info
-                journal.comments_crawled = True
-                MetricService(db).record_snapshot(journal, basic_info, task_id=task.id)
-                db.commit()
+                result = CommentRefreshService(db).replace_if_complete(
+                    journal,
+                    comments,
+                    comment_info,
+                    task_id=task.id,
+                )
+                logger.info(
+                    f"{tag} 评论集合已替换 journal_id={journal_id} "
+                    f"expected={result['expected']} actual={result['actual']} inserted={result['inserted']}"
+                )
 
             if not tm.complete_task(task):
                 return False
@@ -718,10 +779,18 @@ class DistributedWorker:
             db.rollback()
             error_msg = str(e)
             logger.exception(f"{tag} 失败 task={task.id} journal_id={journal_id}")
-            TaskManager(db, self.worker_id).fail_task(task, error_msg)
-            await crawler.report_cookie_result(success=False)
-            await crawler.report_proxy_result(success=False)
-            await self.increment_stats(failed=1)
+            result = await self._handle_task_error(
+                db,
+                task,
+                TaskType.COMMENT.value,
+                e,
+                metadata={"coroutine_id": coroutine_id, "journal_id": journal_id},
+            )
+            if result.report_resource_failure:
+                await crawler.report_cookie_result(success=False)
+                await crawler.report_proxy_result(success=False)
+            if result.count_as_failed:
+                await self.increment_stats(failed=1)
             await self._handle_request_failure(crawler)
             return False
         finally:
@@ -739,7 +808,7 @@ class DistributedWorker:
     ):
         """持久消费者协程：独立拉取任务，完成即拉下一个。
 
-        HTTP 模式复用 httpx client/session；browser 模式复用 browser，只换 context。
+        HTTP 模式复用 crawler 状态，单次请求前重新选择代理；browser 模式复用 browser，只换 context。
         """
         task_types = task_types or [TaskType.CATEGORY.value, TaskType.LIST.value, TaskType.DETAIL.value]
         consumer_key = f"{log_prefix}:{coroutine_id}"
@@ -781,17 +850,17 @@ class DistributedWorker:
                         if fetch_mode == "browser":
                             await crawler.init_browser(use_proxy=True, use_cookie=use_cookie)
                             logger.info(f"[{log_prefix}-{coroutine_id}] 新建 browser type={task_type}")
+                            proxy_info = crawler.get_current_proxy_info()
+                            if proxy_info and proxy_info.get("id"):
+                                self._consumer_proxy_ids[consumer_key] = int(proxy_info["id"])
+                                logger.info(
+                                    f"[{log_prefix}-{coroutine_id}] 分配代理 ID={proxy_info['id']} "
+                                    f"(排除={exclude_ids})"
+                                )
+                            else:
+                                self._consumer_proxy_ids.pop(consumer_key, None)
                         else:
-                            await crawler.init_http(use_proxy=True)
-                            logger.info(f"[{log_prefix}-{coroutine_id}] 新建 http client type={task_type}")
-                        proxy_info = crawler.get_current_proxy_info()
-                        if proxy_info and proxy_info.get("id"):
-                            self._consumer_proxy_ids[consumer_key] = int(proxy_info["id"])
-                            logger.info(
-                                f"[{log_prefix}-{coroutine_id}] 分配代理 ID={proxy_info['id']} "
-                                f"(排除={exclude_ids})"
-                            )
-                        else:
+                            logger.info(f"[{log_prefix}-{coroutine_id}] 新建 http crawler type={task_type}")
                             self._consumer_proxy_ids.pop(consumer_key, None)
                         current_crawler_type = task_type
                 else:
@@ -817,7 +886,7 @@ class DistributedWorker:
                                     self._consumer_proxy_ids[consumer_key] = int(proxy_info["id"])
                                 current_crawler_type = task_type
                     else:
-                        logger.debug(f"[{log_prefix}-{coroutine_id}] 复用 http client")
+                        logger.debug(f"[{log_prefix}-{coroutine_id}] 复用 http crawler")
             except ProxyUnavailableError as e:
                 await self._handle_proxy_unavailable(task, coroutine_id, e)
                 if crawler:
@@ -842,9 +911,12 @@ class DistributedWorker:
                 crawler,
                 log_prefix,
             )
-            proxy_info = crawler.get_current_proxy_info() if crawler else None
-            if proxy_info and proxy_info.get("id"):
-                self._consumer_proxy_ids[consumer_key] = int(proxy_info["id"])
+            if fetch_mode == "browser":
+                proxy_info = crawler.get_current_proxy_info() if crawler else None
+                if proxy_info and proxy_info.get("id"):
+                    self._consumer_proxy_ids[consumer_key] = int(proxy_info["id"])
+                else:
+                    self._consumer_proxy_ids.pop(consumer_key, None)
             else:
                 self._consumer_proxy_ids.pop(consumer_key, None)
 

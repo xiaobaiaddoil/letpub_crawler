@@ -851,7 +851,7 @@ class DetailCrawler(BaseCrawler):
     async def _fetch_comments_from_api(self, journal_id: int, cookie_value: str) -> tuple:
         """通过AJAX API获取评论数据。
 
-        同一 journal_id 的所有评论页复用同一代理（self._current_proxy_info）。
+        每个评论 API HTTP 请求都会在 BaseCrawler.request_http 中重新选择代理。
         Cookie 由调用方传入；检测到未登录时通过接口登录刷新 Cookie 后重试一次。
 
         Returns:
@@ -876,7 +876,7 @@ class DetailCrawler(BaseCrawler):
             page = 1
             max_pages = None
 
-            # Cookie 由调用方传入，始终用 httpx（同一代理贯穿所有评论页）
+            # Cookie 由调用方传入，始终用 httpx。
 
             while max_pages is None or page <= max_pages:
                 # 构建请求参数
